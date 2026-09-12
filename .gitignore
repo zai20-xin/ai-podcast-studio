@@ -1,0 +1,35 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Node
+node_modules/
+frontend/dist/
+npm-debug.log*
+.pnpm-store/
+
+# Runtime data & media (may contain private audio)
+data/
+outputs/
+*.wav
+*.mp3
+!docs/**/*.mp3
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

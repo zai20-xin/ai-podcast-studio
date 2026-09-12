@@ -78,7 +78,7 @@ class LLMService:
         action: str = "colloquial",
         ratio: float | None = None,
     ) -> str:
-        """action: colloquial | shorten | polish"""
+        """action: colloquial | shorten | polish | perform"""
         mode_label = "双人对谈（A/B）" if mode == "dialogue" else "单人朗读"
         if action == "shorten":
             pct = int(round((ratio or 0.6) * 100))
@@ -90,6 +90,20 @@ class LLMService:
             instruction = (
                 "润色脚本：理顺逻辑与口语节奏，修正别扭表达，可微调语气标签，"
                 "不改变事实与整体结构。"
+            )
+        elif action == "perform":
+            # 「演绎化」：面向不懂音频参数的普通用户，把干稿变成可直接合成的演播稿。
+            # 断句与情绪提示交给脚本层面解决，用户就不必自己去调参数。
+            instruction = (
+                "把脚本改写成「可直接合成的演播稿」，目标是让配音念出来自然、有起伏、有呼吸感。"
+                "要求：\n"
+                "1) 长句按语义拆成适合口播的短句，一句话只承载一个意思；\n"
+                "2) 在情绪转折、需要停顿或需要强调的落点插入标签，"
+                "可用 (停顿)(轻笑)(叹气)(深呼吸)(小声)(提高音量) 等；"
+                "标签要克制，平均每两三句最多一处，不要每句都加，否则听起来会做作；\n"
+                "3) 用空行区分段落，同一段落内句子保持连贯；\n"
+                "4) 严格保留原意与全部信息，不新增事实、不改变立场、不删减要点；\n"
+                "5) 不要输出任何解释、标题或说明文字。"
             )
         else:
             instruction = (
@@ -134,8 +148,18 @@ def friendly_error(exc: Exception | str) -> str:
         return "请求超时，网络或服务较慢，请重试"
     if "rate" in low or "429" in low:
         return "请求过于频繁或额度受限，请稍后再试"
+    if (
+        "音频文件不存在" in msg
+        or "参考音频路径无效" in msg
+        or "参考音频必须位于" in msg
+    ):
+        return "参考音频文件已不存在，请重新选择后再试"
+    if "Base64 编码后" in msg or "超过上限" in msg:
+        return "参考音频过大：MiMo 限制 Base64 编码后不超过 10MB（约合原始文件 7.5MB）"
+    if "超过单集上限" in msg:
+        return msg  # 文案里已含具体句数与上限，直接透出
     if "reference" in low or "参考音频" in msg:
-        return "参考音频有问题：请换 10–15 秒干净人声（wav/mp3，≤10MB）"
+        return "参考音频有问题：请换 10–15 秒干净人声（wav/mp3，≤7.5MB）"
     if "脚本为空" in msg or "无法解析" in msg:
         return "脚本无法解析出有效台词，请检查「角色：台词」格式"
     if "未返回音频" in msg:

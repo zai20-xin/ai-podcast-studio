@@ -12,7 +12,7 @@
     "speaker_names"
   ],
   "model_types": ["builtin", "design", "clone"],
-  "episode_status": ["draft", "processing", "done", "error"],
+  "episode_status": ["draft", "processing", "done", "error", "cancelled"],
   "endpoints": {
     "GET /": {
       "required_keys": ["message", "version"]
@@ -67,7 +67,7 @@
       ]
     },
     "POST /api/podcast/parse-script": {
-      "required_keys": ["speakers", "total_lines", "dialogue"],
+      "required_keys": ["speakers", "total_lines", "max_lines", "over_limit", "dialogue"],
       "dialogue_item_keys": ["speaker", "text"]
     },
     "POST /api/podcast/episodes": {
@@ -103,6 +103,15 @@
         "estimated_seconds",
         "dialogue_preview"
       ]
+    },
+    "POST /api/podcast/episodes/{id}/cancel": {
+      "required_keys": ["episode_id", "cancelled", "message"]
+    },
+    "POST /api/podcast/synthesize": {
+      "required_keys": ["message", "episode_id", "total_lines", "estimated_seconds"]
+    },
+    "POST /api/podcast/episodes/{id}/retry": {
+      "required_keys": ["message", "episode_id", "pending_lines"]
     },
     "POST /api/script/generate": {
       "required_keys": ["script"]

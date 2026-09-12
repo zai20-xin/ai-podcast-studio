@@ -1,4 +1,5 @@
 """FastAPI 应用入口"""
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -9,7 +10,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db
 from app.api import projects, podcast, voices, settings, script
-from app.config import AUDIO_DIR, VOICES_DIR
+from app.services.audio import AudioService
+from app.config import (
+    AUDIO_DIR,
+    VOICES_DIR,
+    INTERMEDIATE_KEEP_HOURS,
+    CLEANUP_INTERVAL_HOURS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +58,68 @@ app.mount("/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
 app.mount("/voices", StaticFiles(directory=str(VOICES_DIR)), name="voices")
 
 
+_cleanup_task: asyncio.Task | None = None
+
+
+async def _periodic_cleanup() -> None:
+    """周期性清理中间产物。
+
+    此前 cleanup_old_intermediates / cleanup_temp 定义了却从未被调用，
+    试听产生的 tts_*.wav 会一直堆积在 data/audio 下。
+    """
+    audio = AudioService()
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
+            removed_intermediate = await asyncio.to_thread(
+                audio.cleanup_old_intermediates, INTERMEDIATE_KEEP_HOURS
+            )
+            removed_temp = await asyncio.to_thread(audio.cleanup_temp)
+            if removed_intermediate or removed_temp:
+                logger.info(
+                    "周期清理：中间音频 %d 个、临时文件 %d 个",
+                    removed_intermediate,
+                    removed_temp,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("周期清理失败")
+
+
 @app.on_event("startup")
-def startup():
+async def startup():
     init_db()
+    audio = AudioService()
+    try:
+        removed = await asyncio.to_thread(
+            audio.cleanup_old_intermediates, INTERMEDIATE_KEEP_HOURS
+        )
+        removed += await asyncio.to_thread(audio.cleanup_temp)
+        if removed:
+            logger.info("启动清理：移除 %d 个过期中间文件", removed)
+    except Exception:
+        logger.exception("启动清理失败")
+
+    global _cleanup_task
+    _cleanup_task = asyncio.create_task(_periodic_cleanup())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    # 先取消在飞合成，避免进程退出时留下半截 segments_json / 心跳
+    try:
+        from app.services import task_runner
+
+        task_runner.cancel_all()
+    except Exception:
+        logger.exception("shutdown 取消合成任务失败")
+    if _cleanup_task is not None:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 @app.get("/")

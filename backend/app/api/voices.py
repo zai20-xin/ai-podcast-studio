@@ -83,17 +83,22 @@ async def clone_voice(name: str, audio: UploadFile = File(...), db: Session = De
     safe_stem = SAFE_NAME_RE.sub("_", original_stem)[:64] or "ref"
     file_path = (VOICES_DIR / f"{safe_name}_{safe_stem}{suffix}").resolve()
 
-    if not str(file_path).startswith(str(VOICES_DIR.resolve())):
+    if not file_path.is_relative_to(VOICES_DIR.resolve()):
         raise HTTPException(status_code=400, detail="非法文件路径")
 
+    max_bytes = MAX_REFERENCE_AUDIO_BYTES
+    max_label = f"{max_bytes / 1024 / 1024:.1f}MB"
     size = 0
     with open(file_path, "wb") as f:
         while chunk := await audio.read(1024 * 1024):
             size += len(chunk)
-            if size > MAX_REFERENCE_AUDIO_BYTES:
+            if size > max_bytes:
                 f.close()
                 file_path.unlink(missing_ok=True)
-                raise HTTPException(status_code=400, detail="音频文件不能超过 10MB")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"参考音频不能超过 {max_label}（MiMo Base64 上限 10MB 对应的原始体积）",
+                )
             f.write(chunk)
 
     voice = ClonedVoice(name=safe_name, reference_path=str(file_path))

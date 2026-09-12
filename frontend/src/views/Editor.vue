@@ -25,6 +25,16 @@
           <el-icon v-if="!isSynthesizing"><VideoPlay /></el-icon>
           {{ isSynthesizing ? '合成中…' : '合成新版本' }}
         </el-button>
+        <el-button
+          v-if="isSynthesizing"
+          type="danger"
+          size="large"
+          plain
+          @click="handleStopSynthesize"
+        >
+          <el-icon><CircleClose /></el-icon>
+          停止
+        </el-button>
         <el-dropdown @command="handleExport">
           <el-button size="large">
             导出
@@ -59,7 +69,7 @@
         :status="progressPercent >= 100 ? 'success' : undefined"
       />
       <p class="progress-tip">
-        正在合成 {{ editorStore.progressCurrent }}/{{ editorStore.progressTotal }} 步（含片头片尾），请保持页面打开。完成后会自动刷新版本列表。
+        正在合成 {{ editorStore.progressCurrent }}/{{ editorStore.progressTotal }} 步（含片头片尾）。已成功的分句会缓存；随时可点「停止」，之后续跑不会重做已完成的句子。
       </p>
     </div>
 
@@ -181,23 +191,23 @@
           </div>
 
           <el-alert
-            v-if="failedSegments.length && !isSynthesizing"
-            type="error"
+            v-if="resumeHint && !isSynthesizing"
+            :type="resumeHint.type"
             :closable="false"
             show-icon
             class="retry-alert"
           >
             <template #title>
-              有 {{ failedSegments.length }} 句合成失败，已成功的句子会保留。
+              {{ resumeHint.title }}
             </template>
             <el-button
-              type="danger"
+              :type="resumeHint.type === 'error' ? 'danger' : 'primary'"
               size="small"
               :icon="RefreshRight"
               :loading="isSynthesizing"
               @click="handleRetryFailed"
             >
-              仅重试失败句
+              {{ resumeHint.action }}
             </el-button>
           </el-alert>
 
@@ -214,6 +224,7 @@
                   <span>{{ version.name || defaultVersionName(version, index) }}</span>
                   <el-tag v-if="version.status === 'done'" type="success" size="small" effect="dark" round>完成</el-tag>
                   <el-tag v-else-if="version.status === 'processing'" type="warning" size="small" effect="dark" round>合成中</el-tag>
+                  <el-tag v-else-if="version.status === 'cancelled'" type="info" size="small" effect="dark" round>已停止</el-tag>
                   <el-tag v-else-if="version.status === 'error'" type="danger" size="small" effect="dark" round>失败</el-tag>
                   <el-tag v-else size="small" effect="dark" round>草稿</el-tag>
                 </div>
@@ -221,6 +232,16 @@
                 <div v-if="version.error_message" class="version-error">{{ version.error_message }}</div>
               </div>
               <div class="version-actions" @click.stop>
+                <el-button
+                  v-if="version.status === 'cancelled' || version.status === 'error'"
+                  size="small"
+                  circle
+                  title="续跑"
+                  :loading="isSynthesizing && synthEpisodeId === version.id"
+                  @click="resumeVersion(version)"
+                >
+                  <el-icon><RefreshRight /></el-icon>
+                </el-button>
                 <el-button
                   v-if="version.audio_path && version.status === 'done'"
                   size="small"
@@ -324,7 +345,7 @@
 <script setup>
 import { ref, watch, computed, nextTick, reactive, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, VideoPlay, Download, Delete, Edit, RefreshRight, ArrowDown } from '@element-plus/icons-vue'
+import { ArrowLeft, VideoPlay, Download, Delete, Edit, RefreshRight, ArrowDown, CircleClose } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useEditorStore } from '../stores/editor'
 import ScriptEditor from '../components/ScriptEditor.vue'
@@ -338,7 +359,16 @@ const editorStore = useEditorStore()
 
 const projectId = ref(route.params.projectId)
 const projectName = ref('未命名项目')
-const isSynthesizing = ref(false)
+// 与 store 保持单一真相：此前本地 ref 与 store 各存一份、分别被写，
+// 不同组件可能读到不同的合成状态。
+const isSynthesizing = computed({
+  get: () => editorStore.isSynthesizing,
+  set: (v) => {
+    editorStore.isSynthesizing = v
+  },
+})
+/** 正在进行合成的 episode，供「停止」按钮调用取消接口 */
+const synthEpisodeId = ref(null)
 const sessionReady = ref(false)
 const versions = ref([])
 const currentVersionId = ref(null)
@@ -395,9 +425,41 @@ const draftLabel = computed(() =>
   editorStore.draftSavedAt ? `草稿已存 ${formatDraftTime(editorStore.draftSavedAt)}` : ''
 )
 
-const failedSegments = computed(() =>
-  (editorStore.segments || []).filter((s) => s.status === 'error' && typeof s.index === 'number')
-)
+// 用独立快照而非 segments：脚本一改 segments 就被清空，
+// 会让「仅重试失败句」入口凭空消失。
+const failedSegments = computed(() => editorStore.lastFailedSegments || [])
+
+/**
+ * 续跑入口：优先当前选中且可续跑的版本；
+ * 否则若 store 里还有绑定的失败/停止上下文，也给出入口。
+ */
+const resumeHint = computed(() => {
+  if (isSynthesizing.value) return null
+  const selected = versions.value.find((v) => v.id === currentVersionId.value)
+  const target =
+    selected && (selected.status === 'cancelled' || selected.status === 'error')
+      ? selected
+      : !selected &&
+        editorStore.lastResumableEpisodeId &&
+        (failedSegments.value.length || editorStore.lastStoppedPending)
+        ? { id: editorStore.lastResumableEpisodeId, status: editorStore.lastStoppedPending ? 'cancelled' : 'error' }
+        : null
+  if (!target) return null
+  if (target.status === 'cancelled' || editorStore.lastStoppedPending) {
+    return {
+      episodeId: target.id,
+      type: 'info',
+      title: '已停止合成，已完成的分句会保留，可从断点续跑。',
+      action: '续跑',
+    }
+  }
+  return {
+    episodeId: target.id,
+    type: 'error',
+    title: `有 ${failedSegments.value.length || '部分'} 句合成失败，已成功的句子会保留。`,
+    action: '仅重试失败句',
+  }
+})
 
 const displayLines = computed(() => {
   const meta = []
@@ -665,8 +727,15 @@ async function handleSynthesize() {
     ElMessage.warning('请先输入脚本内容')
     return
   }
-  isSynthesizing.value = true
-  editorStore.isSynthesizing = true
+  // 先等一次解析结果，超限直接拦下，不必创建空版本再失败
+  await editorStore.parseScript()
+  if (editorStore.scriptOverLimit) {
+    ElMessage.warning(
+      `脚本共 ${editorStore.scriptTotalLines} 句，超过单集上限 ${editorStore.scriptMaxLines} 句，请拆成多集`
+    )
+    return
+  }
+  isSynthesizing.value = true   // computed 的 setter 已同步写入 store
   let newEpisodeId = null
   try {
     const res = await api.post('/api/podcast/episodes', {
@@ -709,6 +778,7 @@ async function handleSynthesize() {
       return
     }
 
+    synthEpisodeId.value = newEpisodeId
     await editorStore.synthesize(newEpisodeId)
     await loadVersions({ selectId: newEpisodeId })
     currentVersionId.value = newEpisodeId
@@ -716,8 +786,22 @@ async function handleSynthesize() {
     ElMessage.success('合成完成，可试听或导出')
   } catch (error) {
     if (error?.cancelled) return
+    if (error?.stopped) {
+      // 用户主动停止：不算失败，也不清草稿
+      if (newEpisodeId) currentVersionId.value = newEpisodeId
+      await loadVersions({ skipSelect: true })
+      ElMessage.info('已停止合成，已完成的分句会保留，可稍后续跑')
+      return
+    }
+    const status = error.response?.status
     const msg = error.response?.data?.detail || error.message
-    ElMessage.error('合成失败: ' + msg)
+    if (status === 409) {
+      ElMessage.warning(msg || '该单集已有合成任务在运行')
+    } else if (status === 400 && String(msg || '').includes('上限')) {
+      ElMessage.warning(msg)
+    } else {
+      ElMessage.error('合成失败: ' + msg)
+    }
     if (newEpisodeId) {
       currentVersionId.value = newEpisodeId
       try {
@@ -727,28 +811,65 @@ async function handleSynthesize() {
     }
     await loadVersions({ skipSelect: true })
   } finally {
+    synthEpisodeId.value = null
     isSynthesizing.value = false
   }
 }
 
+/** 停止合成：调用后端取消接口，真正中断任务而不只是停止前端轮询 */
+async function handleStopSynthesize() {
+  const id = synthEpisodeId.value
+  if (!id) {
+    // 确认弹窗阶段尚未创建任务，或任务已结束
+    ElMessage.info('当前没有正在运行的合成任务')
+    return
+  }
+  const ok = await editorStore.stopSynthesis(id)
+  if (ok) {
+    ElMessage.info('已停止合成，已完成的分句会保留')
+  } else {
+    ElMessage.warning('当前没有正在运行的合成任务')
+  }
+}
+
 async function handleRetryFailed() {
-  if (!currentVersionId.value) return
-  const epochTarget = currentVersionId.value
+  const targetId = resumeHint.value?.episodeId || currentVersionId.value
+  if (!targetId) return
+  const epochTarget = targetId
+  synthEpisodeId.value = epochTarget
   isSynthesizing.value = true
   try {
     await editorStore.retrySynthesis(epochTarget)
     await loadVersions({ selectId: epochTarget })
+    editorStore.clearResumeContext(epochTarget)
     ElMessage.success('续跑完成')
   } catch (error) {
     if (error?.cancelled) return
-    ElMessage.error('续跑失败: ' + (error.message || error))
+    if (error?.stopped) {
+      await loadVersions({ skipSelect: true })
+      ElMessage.info('已停止续跑，已完成的分句会保留')
+      return
+    }
+    const msg = error.response?.data?.detail || error.message || error
+    if (error.response?.status === 409) {
+      ElMessage.warning(msg || '该单集已有合成任务在运行')
+    } else {
+      ElMessage.error('续跑失败: ' + msg)
+    }
     try {
       const st = await api.get(`/api/podcast/episodes/${epochTarget}/status`)
       editorStore.segments = st.data.segments || []
     } catch { /* ignore */ }
   } finally {
+    synthEpisodeId.value = null
     isSynthesizing.value = false
   }
+}
+
+async function resumeVersion(version) {
+  currentVersionId.value = version.id
+  await nextTick()
+  await handleRetryFailed()
 }
 
 async function renameVersion(version) {

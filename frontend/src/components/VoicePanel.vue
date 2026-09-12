@@ -148,40 +148,52 @@
             <div v-else class="upload-placeholder">
               <el-icon><Upload /></el-icon>
               <span>拖入或点击上传</span>
-              <span class="tip">10–15 秒干净人声 · wav/mp3 · ≤10MB</span>
+              <span class="tip">10–15 秒干净人声 · wav/mp3 · ≤7.5MB</span>
             </div>
           </el-upload>
         </el-form-item>
       </template>
 
-      <div class="row-2">
-        <el-form-item label="风格">
-          <el-select v-model="config.style" style="width: 100%" clearable placeholder="默认风格">
-            <el-option v-for="name in styleList" :key="name" :label="name" :value="name" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="语速">
-          <el-select v-model="config.speed" style="width: 100%" clearable placeholder="默认语速">
-            <el-option v-for="name in speedList" :key="name" :label="name" :value="name" />
-          </el-select>
-        </el-form-item>
-      </div>
+      <el-collapse class="advanced-block">
+        <el-collapse-item name="advanced">
+          <template #title>
+            <span class="adv-title">高级设置</span>
+            <el-tag v-if="advancedCustomized" size="small" type="warning" effect="plain" round class="adv-tag">
+              已自定义
+            </el-tag>
+            <span v-else class="adv-hint">已按场景自动设定，通常无需修改</span>
+          </template>
+          <div class="row-2">
+            <el-form-item label="风格">
+              <el-select v-model="config.style" style="width: 100%" clearable placeholder="默认风格" @change="markAdvancedCustomized">
+                <el-option v-for="name in styleList" :key="name" :label="name" :value="name" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="语速">
+              <el-select v-model="config.speed" style="width: 100%" clearable placeholder="默认语速" @change="markAdvancedCustomized">
+                <el-option v-for="name in speedList" :key="name" :label="name" :value="name" />
+              </el-select>
+            </el-form-item>
+          </div>
 
-      <div class="row-2">
-        <el-form-item label="句首标签">
-          <el-select
-            v-model="config.audio_tag_style"
-            style="width: 100%"
-            clearable
-            placeholder="不添加"
-          >
-            <el-option v-for="name in tagList" :key="name" :label="name" :value="name" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="情绪">
-          <el-input v-model="config.emotion" placeholder="开心 / 沉稳" clearable />
-        </el-form-item>
-      </div>
+          <div class="row-2">
+            <el-form-item label="句首标签">
+              <el-select
+                v-model="config.audio_tag_style"
+                style="width: 100%"
+                clearable
+                placeholder="不添加"
+                @change="markAdvancedCustomized"
+              >
+                <el-option v-for="name in tagList" :key="name" :label="name" :value="name" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="情绪">
+              <el-input v-model="config.emotion" placeholder="开心 / 沉稳" clearable @change="markAdvancedCustomized" />
+            </el-form-item>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
 
       <el-button
         class="try-btn"
@@ -234,6 +246,13 @@ const uploadRef = ref(null)
 const styleList = ref([])
 const speedList = ref([])
 const tagList = ref([])
+
+// 用户是否手动动过高级项：动了就在折叠区标题上标出来，让状态可见
+const advancedCustomized = ref(false)
+
+function markAdvancedCustomized() {
+  advancedCustomized.value = true
+}
 
 onMounted(async () => {
   try {
@@ -303,6 +322,8 @@ function applyPreset(presetName) {
   props.config.speed = preset.speed || null
   props.config.emotion = preset.emotion || ''
   // 预设不改句首标签，避免静默覆盖用户细调
+  // 重新套用预设后，高级项回到「自动设定」状态
+  advancedCustomized.value = false
   if (preset.voice_id) {
     // 记住该通道音色
     emit('remember-voice', preset.voice_id)
@@ -403,8 +424,9 @@ async function onAudioUpload(file) {
     ElMessage.error('仅支持 wav / mp3')
     return
   }
-  if (file.raw.size > 10 * 1024 * 1024) {
-    ElMessage.error('文件不能超过 10MB')
+  // 与后端 MAX_REFERENCE_AUDIO_BYTES 对齐：MiMo b64 上限 10MB ≈ 原始 7.5MB
+  if (file.raw.size > 7.5 * 1024 * 1024) {
+    ElMessage.error('参考音频不能超过 7.5MB（MiMo Base64 限制）')
     return
   }
   uploading.value = true
@@ -511,5 +533,37 @@ async function onAudioUpload(file) {
   gap: 8px;
   width: 100%;
   align-items: center;
+}
+
+/* 高级设置折叠区：视觉上融入表单，默认收起 */
+.advanced-block {
+  border-top: none;
+  border-bottom: none;
+  margin-bottom: 2px;
+}
+
+.advanced-block :deep(.el-collapse-item__header) {
+  height: 34px;
+  background: transparent;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+
+.advanced-block :deep(.el-collapse-item__wrap) {
+  background: transparent;
+  border-bottom: none;
+}
+
+.adv-title {
+  font-size: 13px;
+}
+
+.adv-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--studio-muted, #999);
+}
+
+.adv-tag {
+  margin-left: 8px;
 }
 </style>

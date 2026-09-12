@@ -33,3 +33,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Local verify scratch / vite timestamp dumps
+backend/_verify*
+*.timestamp-*.mjs

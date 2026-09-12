@@ -157,3 +157,141 @@ describe('editor store', () => {
     expect(store.hostA.voice_id).toBe('苏打')
   })
 })
+
+describe('合成中断与失败上下文', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('clearSegmentStatus 保留失败清单，改稿后仍能续跑', () => {
+    const store = useEditorStore()
+    store.lastFailedSegments = [{ index: 2, status: 'error', error: '超时' }]
+    store.segments = [{ index: 0, status: 'done' }]
+    store.clearSegmentStatus()
+    expect(store.segments).toEqual([])
+    // 失败清单属于上一次合成的结果，不能被连带清掉，否则重试入口会消失
+    expect(store.lastFailedSegments).toHaveLength(1)
+  })
+
+  it('轮询遇到 cancelled 会中断并标记 stopped', async () => {
+    const store = useEditorStore()
+    api.post.mockResolvedValueOnce({ data: { total_lines: 5 } })
+    api.get.mockResolvedValueOnce({
+      data: { status: 'cancelled', progress_current: 2, progress_total: 5, segments: [] },
+    })
+    await expect(store.synthesize(1)).rejects.toMatchObject({ stopped: true })
+    expect(store.isSynthesizing).toBe(false)
+  })
+
+  it('clearDraft 会取消挂起的写入，草稿不复活', () => {
+    vi.useFakeTimers()
+    const store = useEditorStore()
+    store.bindProject(7)
+    store.script = 'A: 内容'
+    store.scheduleDraftSave()
+    store.clearDraft()
+    vi.advanceTimersByTime(1000)
+    expect(localStorage.getItem('aps:draft:v1:7')).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('clearDraft 之后再次编辑，草稿恢复保存', () => {
+    vi.useFakeTimers()
+    const store = useEditorStore()
+    store.bindProject(8)
+    store.clearDraft()
+    store.script = 'A: 新的内容'
+    store.scheduleDraftSave()
+    vi.advanceTimersByTime(1000)
+    expect(localStorage.getItem('aps:draft:v1:8')).not.toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('合成失败时留存失败清单，成功时清空', async () => {
+    const store = useEditorStore()
+    api.post.mockResolvedValueOnce({ data: { total_lines: 3 } })
+    api.get.mockResolvedValueOnce({
+      data: {
+        status: 'error',
+        error_message: '第 2 句失败',
+        segments: [
+          { index: 0, status: 'done' },
+          { index: 1, status: 'error', error: '超时' },
+        ],
+        failed_count: 1,
+      },
+    })
+    await expect(store.synthesize(1)).rejects.toThrow()
+    expect(store.lastFailedSegments).toHaveLength(1)
+    expect(store.lastFailedSegments[0].index).toBe(1)
+  })
+
+  it('stopSynthesis 调用后端取消接口', async () => {
+    const store = useEditorStore()
+    api.post.mockResolvedValueOnce({ data: { cancelled: true } })
+    await expect(store.stopSynthesis(9)).resolves.toBe(true)
+    expect(api.post).toHaveBeenCalledWith('/api/podcast/episodes/9/cancel')
+  })
+
+  it('取消后仅 pending 也会标记可续跑，而失败清单可为空', async () => {
+    const store = useEditorStore()
+    api.post.mockResolvedValueOnce({ data: { total_lines: 3 } })
+    api.get.mockResolvedValueOnce({
+      data: {
+        status: 'cancelled',
+        segments: [
+          { index: 0, status: 'done' },
+          { index: 1, status: 'pending' },
+          { index: 2, status: 'pending' },
+        ],
+      },
+    })
+    await expect(store.synthesize(11)).rejects.toMatchObject({ stopped: true })
+    expect(store.lastFailedSegments).toHaveLength(0)
+    expect(store.lastResumableEpisodeId).toBe(11)
+    expect(store.lastStoppedPending).toBe(true)
+  })
+
+  it('HTTP 错误（无 segments）不清掉上次续跑上下文', async () => {
+    const store = useEditorStore()
+    store.lastFailedSegments = [{ index: 2, status: 'error', error: '旧失败' }]
+    store.lastResumableEpisodeId = 77
+    api.post.mockRejectedValueOnce({
+      response: { status: 409, data: { detail: '该单集正在合成中' } },
+      message: 'Request failed with status code 409',
+    })
+    await expect(store.synthesize(88)).rejects.toThrow()
+    expect(store.lastFailedSegments).toHaveLength(1)
+    expect(store.lastResumableEpisodeId).toBe(77)
+  })
+
+  it('clearResumeContext 只清指定 episode', () => {
+    const store = useEditorStore()
+    store.lastFailedSegments = [{ index: 0, status: 'error' }]
+    store.lastResumableEpisodeId = 5
+    store.clearResumeContext(9)
+    expect(store.lastResumableEpisodeId).toBe(5)
+    store.clearResumeContext(5)
+    expect(store.lastResumableEpisodeId).toBeNull()
+    expect(store.lastFailedSegments).toHaveLength(0)
+  })
+
+  it('parseScript 记录 over_limit', async () => {
+    const store = useEditorStore()
+    store.script = 'A: 超长脚本'
+    api.post.mockResolvedValueOnce({
+      data: {
+        speakers: ['A'],
+        total_lines: 220,
+        max_lines: 200,
+        over_limit: true,
+        dialogue: [],
+      },
+    })
+    await store.parseScript()
+    expect(store.scriptOverLimit).toBe(true)
+    expect(store.scriptMaxLines).toBe(200)
+  })
+})

@@ -2,10 +2,13 @@
 import os
 import base64
 import uuid
+import random
+import asyncio
 import logging
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
-from openai import AsyncOpenAI, APIError, APITimeoutError, RateLimitError
+from openai import AsyncOpenAI, APIError, APIConnectionError, APITimeoutError, RateLimitError
 
 from app.config import (
     AUDIO_DIR,
@@ -13,7 +16,12 @@ from app.config import (
     DEFAULT_BASE_URL,
     TTS_TIMEOUT_SECONDS,
     TTS_MAX_RETRIES,
+    TTS_CONCURRENCY,
+    TTS_RATE_LIMIT_RETRIES,
+    TTS_RATE_LIMIT_BASE_DELAY,
+    TTS_RATE_LIMIT_MAX_DELAY,
     MAX_REFERENCE_AUDIO_BYTES,
+    MAX_REFERENCE_AUDIO_B64_BYTES,
     runtime_config,
 )
 
@@ -25,21 +33,25 @@ MODEL_IDS = {
     "clone": "mimo-v2.5-tts-voiceclone",
 }
 
+# 语气修正短语：只描述「怎么说」的语气质感。
+# 刻意不涉及语速（由 SPEED_PRESETS 唯一负责）与音色（由 voice_id 决定）。
+# 旧版本 14 条里有 12 条自带「语速偏慢 / 语速急促」之类的表述，与语速字典叠加后
+# 会让同一条指令对语速出现多种互斥要求，反而让模型行为不可预测。
 STYLE_PRESETS = {
-    "温柔": "用温柔舒缓的语气说话，语速偏慢，声音轻柔，像在哄孩子入睡",
-    "兴奋": "用兴奋激动的语气说话，语速偏快，声音高亢，充满活力和热情",
-    "悲伤": "用悲伤低沉的语气说话，语速缓慢，声音沙哑低沉，带着哽咽感",
-    "愤怒": "用愤怒的语气说话，语速较快，声音尖锐有力，带着明显的怒气",
-    "严肃": "用严肃正式的语气说话，语速适中，声音沉稳有力，带有权威感",
-    "幽默": "用幽默诙谐的语气说话，语速轻快，声音带着笑意，轻松愉快",
-    "紧张": "用紧张焦虑的语气说话，语速急促，声音颤抖，带着紧迫感",
-    "平静": "用平静从容的语气说话，语速平稳，声音柔和，不带明显情绪波动",
-    "叙述": "用讲故事的口吻叙述，语速适中，声音富有感染力，带有画面感",
-    "新闻播报": "用新闻播报的专业语气，语速均匀，吐字清晰，语气客观正式",
-    "撒娇": "用撒娇的语气说话，声音软糯，尾音拖长带着依赖感",
-    "磁性低沉": "用低沉磁性的嗓音说话，声音浑厚有共鸣，像深夜电台主播",
-    "活泼可爱": "用活泼可爱的语气说话，语速轻快，声音清脆明亮",
-    "苍老": "用苍老沙哑的声音说话，语速缓慢，带着岁月沧桑感",
+    "温柔": "语气温柔轻缓，像在安抚对方",
+    "兴奋": "语气兴奋昂扬，透着按捺不住的劲头",
+    "悲伤": "语气低沉克制，像在压着情绪说话",
+    "愤怒": "语气凌厉带火气，字字用力",
+    "严肃": "语气正式沉稳，带着不容置疑的分量",
+    "幽默": "语气诙谐松弛，话里带着笑意",
+    "紧张": "语气发紧发慌，像在赶时间",
+    "平静": "语气平和从容，情绪不外露",
+    "叙述": "用讲故事的口吻娓娓道来，有画面感",
+    "新闻播报": "播报腔，客观克制，不带个人情绪",
+    "撒娇": "语气软糯黏人，尾音拖着不肯放",
+    "磁性低沉": "语气低回放松，像深夜电台",
+    "活泼可爱": "语气轻快跳脱，朝气外放",
+    "苍老": "语气迟缓沧桑，像在回忆往事",
 }
 
 SPEED_PRESETS = {
@@ -93,6 +105,21 @@ class AsyncMimoOpenAI(AsyncOpenAI):
         return {"api-key": self.api_key}
 
 
+# 并发闸门：按事件循环缓存，使同一进程内所有 TTSService 实例共享同一个并发上限。
+# TTSService 是「每次请求新建」的，若把信号量挂在实例上则完全起不到限制作用。
+# 用 WeakKeyDictionary：loop 结束后自动回收，避免 id(loop) 复用拿到陈旧 Semaphore。
+_semaphores: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(TTS_CONCURRENCY)
+        _semaphores[loop] = sem
+    return sem
+
+
 class TTSService:
     def __init__(self):
         self.api_key = runtime_config.api_key
@@ -128,10 +155,21 @@ class TTSService:
         mime_map = {"mp3": "audio/mpeg", "wav": "audio/wav"}
         if suffix not in mime_map:
             raise ValueError(f"不支持的音频格式: {suffix}，仅支持 wav 和 mp3")
+        size = path.stat().st_size
+        # 粗筛：base64 会膨胀约 4/3，先用折算后的原始体积上限挡住超大文件，避免整个读进内存
+        if size > MAX_REFERENCE_AUDIO_BYTES:
+            raise ValueError(
+                f"参考音频 {size / 1024 / 1024:.1f}MB 超过上限 "
+                f"{MAX_REFERENCE_AUDIO_BYTES / 1024 / 1024:.1f}MB（MiMo 限制 Base64 编码后不超过 10MB）"
+            )
         data = path.read_bytes()
-        if len(data) > MAX_REFERENCE_AUDIO_BYTES:
-            raise ValueError("音频文件不能超过 10MB")
         b64 = base64.b64encode(data).decode("utf-8")
+        # 服务端约束落在编码后的字符串上，这里按同一口径复核
+        if len(b64) > MAX_REFERENCE_AUDIO_B64_BYTES:
+            raise ValueError(
+                f"参考音频 Base64 编码后为 {len(b64) / 1024 / 1024:.1f}MB，"
+                "超过 MiMo 的 10MB 上限，请换用更短或更低码率的样本"
+            )
         return f"data:{mime_map[suffix]};base64,{b64}"
 
     def _build_instruction(
@@ -141,19 +179,33 @@ class TTSService:
         emotion: str | None = None,
         global_instruction: str | None = None,
     ) -> str:
-        parts = []
-        if global_instruction:
-            parts.append(global_instruction)
-        if style and style in STYLE_PRESETS:
-            parts.append(STYLE_PRESETS[style])
-        elif style:
-            parts.append(style)
-        if speed and speed in SPEED_PRESETS:
-            parts.append(SPEED_PRESETS[speed])
-        elif speed:
-            parts.append(f"语速{speed}")
+        """组装发给 TTS 的「导演指令」。
+
+        维度职责分离，避免同一维度被多个来源重复描述（旧实现会把三处对语速的
+        不同要求一起发出去，互相矛盾）：
+          - global_instruction：情境描述（角色 / 场景 / 怎么演），由场景预设提供
+          - style：语气修正
+          - emotion：情绪修正
+          - speed：语速的唯一来源
+        """
+        parts: list[str] = []
+
+        direction = (global_instruction or "").strip().rstrip("。，,.")
+        if direction:
+            parts.append(direction)
+
+        if style:
+            parts.append(STYLE_PRESETS.get(style) or style)
+
         if emotion:
-            parts.append(f"情绪：{emotion}")
+            emotion_text = str(emotion).strip()
+            if emotion_text:
+                parts.append(f"整体情绪偏{emotion_text}")
+
+        # 语速全流程只在这里出现一次
+        if speed:
+            parts.append(SPEED_PRESETS.get(speed) or f"语速{speed}")
+
         return "。".join(parts)
 
     def _build_audio_tag_text(self, text: str, audio_tag_style: str | None) -> str:
@@ -190,19 +242,60 @@ class TTSService:
         messages.append({"role": "assistant", "content": speak_text})
         return messages
 
+    @staticmethod
+    async def _backoff(attempt: int) -> None:
+        """指数退避 + 抖动；asyncio.sleep 可被取消，等待期间仍能响应停止请求"""
+        delay = min(TTS_RATE_LIMIT_BASE_DELAY * (2**attempt), TTS_RATE_LIMIT_MAX_DELAY)
+        delay *= 0.5 + random.random() * 0.5
+        logger.info("触发限流，%.1fs 后重试（第 %d 次）", delay, attempt + 1)
+        await asyncio.sleep(delay)
+
     async def _create_completion(self, model: str, messages: list[dict], audio_params: dict):
-        try:
-            return await self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                audio=audio_params,
-            )
-        except APITimeoutError as e:
-            raise RuntimeError(f"TTS 请求超时（{TTS_TIMEOUT_SECONDS}s）") from e
-        except RateLimitError as e:
-            raise RuntimeError("TTS API 触发限流，请稍后重试") from e
-        except APIError as e:
-            raise RuntimeError(f"TTS API 错误: {e}") from e
+        """受并发闸门约束的单次调用；对限流/连接错误/5xx 做退避重试。
+
+        CancelledError 继承自 BaseException，不会被下面的 except 分支吞掉，
+        因此任务被取消时能正常向上传播，并中断正在进行的 HTTP 请求。
+        SDK 的 max_retries 保持 0，避免与这里的退避叠成双层重试。
+        """
+        attempt = 0
+        while True:
+            try:
+                async with _get_semaphore():
+                    return await self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        audio=audio_params,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except RateLimitError as e:
+                if attempt >= TTS_RATE_LIMIT_RETRIES:
+                    raise RuntimeError(
+                        f"TTS 持续限流（已重试 {attempt} 次），"
+                        "请调低 TTS_CONCURRENCY 或稍后再试"
+                    ) from e
+                await self._backoff(attempt)
+                attempt += 1
+            except APITimeoutError as e:
+                if attempt >= TTS_RATE_LIMIT_RETRIES:
+                    raise RuntimeError(f"TTS 请求超时（{TTS_TIMEOUT_SECONDS}s）") from e
+                logger.warning("TTS 超时，退避后重试（第 %d 次）", attempt + 1)
+                await self._backoff(attempt)
+                attempt += 1
+            except APIConnectionError as e:
+                if attempt >= TTS_RATE_LIMIT_RETRIES:
+                    raise RuntimeError("TTS 网络连接失败，请检查网络后重试") from e
+                logger.warning("TTS 连接失败，退避后重试（第 %d 次）: %s", attempt + 1, e)
+                await self._backoff(attempt)
+                attempt += 1
+            except APIError as e:
+                status = getattr(e, "status_code", None)
+                if status is not None and status >= 500 and attempt < TTS_RATE_LIMIT_RETRIES:
+                    logger.warning("TTS 服务端 %s，退避后重试（第 %d 次）", status, attempt + 1)
+                    await self._backoff(attempt)
+                    attempt += 1
+                    continue
+                raise RuntimeError(f"TTS API 错误: {e}") from e
 
     async def synthesize(
         self,

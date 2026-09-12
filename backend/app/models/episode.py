@@ -16,7 +16,7 @@ class Episode(Base):
     host_b_config = Column(Text)
     global_instruction = Column(Text)
     audio_path = Column(String)
-    status = Column(String, default="draft")  # draft | processing | done | error
+    status = Column(String, default="draft")  # draft | processing | done | error | cancelled
     progress_current = Column(Integer, default=0)
     progress_total = Column(Integer, default=0)
     error_message = Column(String)

@@ -18,8 +18,59 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 TTS_TIMEOUT_SECONDS = 120.0
-TTS_MAX_RETRIES = 2
-MAX_REFERENCE_AUDIO_BYTES = 10 * 1024 * 1024
+# SDK 内建重试关闭：限流与连接错误都由 TTSService 统一退避，避免双层重试放大请求量
+TTS_MAX_RETRIES = 0
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# 同时在飞的 TTS 请求数上限：过高会触发服务端限流，过低则长稿合成很慢
+TTS_CONCURRENCY = _env_int("TTS_CONCURRENCY", 4)
+# 触发限流后的退避重试策略（指数退避 + 抖动）
+TTS_RATE_LIMIT_RETRIES = _env_int("TTS_RATE_LIMIT_RETRIES", 4)
+TTS_RATE_LIMIT_BASE_DELAY = _env_float("TTS_RATE_LIMIT_BASE_DELAY", 1.0)
+TTS_RATE_LIMIT_MAX_DELAY = _env_float("TTS_RATE_LIMIT_MAX_DELAY", 30.0)
+
+# 参考音频限制：MiMo 官方约束是「Base64 编码后的字符串不超过 10MB」。
+# base64 的体积约为原始的 4/3，故原始文件上限需相应折算，否则会在服务端被拒。
+MAX_REFERENCE_AUDIO_B64_BYTES = 10 * 1024 * 1024
+MAX_REFERENCE_AUDIO_BYTES = MAX_REFERENCE_AUDIO_B64_BYTES * 3 // 4
+# 响度归一 / 句间停顿（毫秒），被合并与字幕时间轴共同引用
+SILENCE_GAP_MS = 600
+# 停顿分级：让段落、章节之间有明显的呼吸感，而不是从头到尾一个值。
+# 单一停顿是「AI 播客听起来平」的主要来源之一。
+SILENCE_GAP_SHORT_MS = _env_int("SILENCE_GAP_SHORT_MS", 350)          # 句与句
+SILENCE_GAP_PARAGRAPH_MS = _env_int("SILENCE_GAP_PARAGRAPH_MS", 900)  # 段落之间（空行）
+SILENCE_GAP_SECTION_MS = _env_int("SILENCE_GAP_SECTION_MS", 1400)     # 章节之间（【章节】）
+# 停顿层级：0=不停顿 1=句间 2=段落 3=章节
+GAP_NONE, GAP_SHORT, GAP_PARAGRAPH, GAP_SECTION = 0, 1, 2, 3
+GAP_LEVEL_TO_MS = {
+    GAP_NONE: 0,
+    GAP_SHORT: SILENCE_GAP_SHORT_MS,
+    GAP_PARAGRAPH: SILENCE_GAP_PARAGRAPH_MS,
+    GAP_SECTION: SILENCE_GAP_SECTION_MS,
+}
+# 中间产物清理：保留时长与扫描间隔（进程启动时也会先扫一次）
+INTERMEDIATE_KEEP_HOURS = _env_int("INTERMEDIATE_KEEP_HOURS", 24)
+CLEANUP_INTERVAL_HOURS = _env_float("CLEANUP_INTERVAL_HOURS", 6.0)
 
 DEFAULT_LLM_BASE_URL = "http://localhost:3001/v1"
 DEFAULT_LLM_MODEL = "auto"

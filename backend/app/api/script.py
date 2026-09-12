@@ -18,7 +18,7 @@ class ScriptGenerateRequest(BaseModel):
 class ScriptRewriteRequest(BaseModel):
     script: str = Field(min_length=10, max_length=20000)
     mode: str = "dialogue"
-    action: str = "colloquial"  # colloquial | shorten | polish
+    action: str = "colloquial"  # colloquial | shorten | polish | perform
     ratio: float | None = Field(default=None, ge=0.3, le=0.95)
 
 
@@ -46,8 +46,10 @@ def generate_script(data: ScriptGenerateRequest):
 def rewrite_script(data: ScriptRewriteRequest):
     if data.mode not in ("single", "dialogue"):
         raise HTTPException(status_code=400, detail="mode 须为 single 或 dialogue")
-    if data.action not in ("colloquial", "shorten", "polish"):
-        raise HTTPException(status_code=400, detail="action 须为 colloquial / shorten / polish")
+    if data.action not in ("colloquial", "shorten", "polish", "perform"):
+        raise HTTPException(
+            status_code=400, detail="action 须为 colloquial / shorten / polish / perform"
+        )
     try:
         svc = LLMService()
         script = svc.rewrite_script(

@@ -1,102 +1,152 @@
-"""播客场景预设配置"""
-# 预设格式: name -> {voice_id, style, speed, emotion, global_instruction}
-# 用户选择预设后，自动填充到主播配置和全局指令中
+"""播客场景预设配置
+
+每个预设 = 音色 + 语速 + 一段「导演式情境描述」。
+
+设计原则（目的是让发给 TTS 的指令不自相矛盾）：
+1. `global_instruction` 只描述「怎么演」——角色是谁、在什么场景、情绪与语气如何。
+   **刻意不写语速**：语速由独立的 `speed` 字段承担，全流程只出现一次。
+   旧版每条预设都在描述里写了语速，与语速字典叠加后会产生多种互斥要求。
+2. 预设不再设置 `style` / `emotion`：这两个维度已被情境描述覆盖，
+   重复设置只会互相干扰。字段保留（前端「高级设置」手动覆盖时才会用到），预设一律留空。
+3. 情境描述按 MiMo 官方推荐的「角色 / 场景 / 指导」结构写成连贯自然语言，
+   而不是关键词罗列。
+
+字段格式：name -> {description, voice_id, speed, style, emotion, global_instruction}
+"""
 
 SCENE_PRESETS = {
     "📖 讲故事": {
         "description": "生动有代入感的故事讲述",
         "voice_id": "冰糖",
-        "style": "叙述",
         "speed": "正常",
-        "emotion": "平静",
-        "global_instruction": "讲故事场景，有代入感、有感染力，自然停顿，像在给朋友讲故事",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你是给朋友讲故事的讲述者，对方正听得入神。像坐在对面聊天那样，"
+            "把画面一点点铺开，句子有起有落，关键处稍作停顿，让对方跟上。"
+        ),
     },
     "🎓 知识分享": {
         "description": "清晰专业的知识讲解",
         "voice_id": "苏打",
-        "style": "平静",
         "speed": "正常",
-        "emotion": "专注",
-        "global_instruction": "知识分享场景，吐字清晰，重点突出，像老师在讲课，通俗易懂",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你是把复杂事情讲明白的讲解者，听众是刚入门的新手。先说结论再讲原因，"
+            "重音落在关键概念上，少堆术语，像面对面讲课那样把逻辑一层层递进下去。"
+        ),
     },
     "📰 新闻播报": {
         "description": "专业客观的新闻播报",
         "voice_id": "茉莉",
-        "style": "新闻播报",
         "speed": "偏快",
-        "emotion": "严肃",
-        "global_instruction": "新闻播报场景，语速均匀，吐字清晰，语气客观正式，不带个人情绪",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你是新闻播音员，正在播报当天要闻。语气客观克制，不带个人判断，"
+            "每条信息交代完整，句读干净利落。"
+        ),
     },
     "💬 深度访谈": {
         "description": "自然流畅的访谈对话",
         "voice_id": "冰糖",
-        "style": "平静",
         "speed": "正常",
-        "emotion": "沉稳",
-        "global_instruction": "访谈对话场景，口语化，自然停顿，像朋友聊天，减少播音腔",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你是访谈节目的主持人，正在和朋友聊一个有意思的话题。语气松弛自然，"
+            "允许口语、语气词和思考时的停顿，不要播音腔。"
+        ),
     },
     "👶 亲子故事": {
         "description": "温柔亲切的儿童内容",
         "voice_id": "冰糖",
-        "style": "温柔",
         "speed": "偏慢",
-        "emotion": "温柔",
-        "global_instruction": "讲给孩子听，声音轻柔温暖，语速慢，有亲和力，像妈妈在哄睡",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你在给一个学龄前的孩子讲故事，他正睁大眼睛等着下一句。声音温暖亲切，"
+            "情绪跟着情节走，小动物开口时可以微微变调。"
+        ),
     },
     "🔍 悬疑讲述": {
         "description": "紧张神秘的悬疑氛围",
         "voice_id": "白桦",
-        "style": "紧张",
         "speed": "偏慢",
-        "emotion": "紧张",
-        "global_instruction": "悬疑讲述场景，营造紧张氛围，语速慢，有神秘感，让人屏住呼吸",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你在讲一个悬疑故事，听众正屏着呼吸。声音压低，线索抛出之前先停一下，"
+            "让紧张感一点点累积起来。"
+        ),
     },
     "💼 商业财经": {
         "description": "专业稳重的财经分析",
-        "voice_id": "Dean",
-        "style": "严肃",
+        # 原为英文男声 Dean，中文财经内容用中文音色更自然
+        "voice_id": "白桦",
         "speed": "正常",
-        "emotion": "沉稳",
-        "global_instruction": "商业财经场景，专业稳重，有权威感，数据清晰，逻辑严谨",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你是财经节目的分析主播，正在向听众解释一组数据意味着什么。语气稳重有分寸，"
+            "说到关键数字时稍作停顿，留给听众消化的时间。"
+        ),
     },
     "💪 激情演讲": {
         "description": "富有感染力的演讲",
         "voice_id": "苏打",
-        "style": "兴奋",
         "speed": "偏快",
-        "emotion": "兴奋",
-        "global_instruction": "演讲场景，充满激情，声音高亢，节奏感强，有号召力",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你正在台上做一场鼓舞人心的演讲，台下坐满了人。声音有力量，节奏往前推，"
+            "排比句层层加重，号召的那一句放慢加重。"
+        ),
     },
     "🌙 睡前陪伴": {
         "description": "舒缓放松的睡前内容",
         "voice_id": "冰糖",
-        "style": "温柔",
         "speed": "很慢",
-        "emotion": "平静",
-        "global_instruction": "睡前陪伴场景，语速非常慢，声音轻柔，像在耳边低语，让人放松入睡",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你是深夜电台的陪伴型主播，听众正躺在床上准备入睡。说话很轻，"
+            "像在耳边低语，句尾自然下沉，句与句之间留出让人放松下来的空白。"
+        ),
     },
     "😄 轻松闲聊": {
         "description": "轻松愉快的聊天氛围",
-        "voice_id": "Mia",
-        "style": "幽默",
+        # 原为英文女声 Mia，中文闲聊内容用中文音色更自然
+        "voice_id": "冰糖",
         "speed": "偏快",
-        "emotion": "开心",
-        "global_instruction": "轻松闲聊场景，口语化，带着笑意，像朋友之间聊天，轻松愉快",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你和朋友在录一期轻松的聊天节目，气氛随意。语气带着笑意，"
+            "允许笑场和插话式的自我打断，像真的在聊天而不是在念稿。"
+        ),
     },
     "📚 有声书": {
         "description": "专业有声书朗读",
         "voice_id": "白桦",
-        "style": "叙述",
         "speed": "正常",
-        "emotion": "平静",
-        "global_instruction": "有声书朗读场景，叙述自然，情感适中，有画面感，像专业播音员",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你在朗读一本有声书，听众戴着耳机在通勤路上听。叙述平稳，"
+            "人物对话略作区分，不抢戏，让人愿意一直听下去。"
+        ),
     },
     "🏋️ 健康生活": {
         "description": "积极向上的健康内容",
         "voice_id": "苏打",
-        "style": "平静",
         "speed": "正常",
-        "emotion": "积极",
-        "global_instruction": "健康生活场景，积极向上，通俗易懂，有亲和力，像朋友分享经验",
+        "style": "",
+        "emotion": "",
+        "global_instruction": (
+            "你在分享自己的健康生活经验，像跟朋友聊天那样。语气积极但不打鸡血，"
+            "把方法说得具体、可执行。"
+        ),
     },
 }

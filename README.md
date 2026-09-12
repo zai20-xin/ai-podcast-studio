@@ -77,6 +77,10 @@ npm run dev
 | `LLM_API_KEY` | 写稿 LLM Key（可选） |
 | `LLM_BASE_URL` | OpenAI 兼容 Base URL，默认 `http://localhost:3001/v1` |
 | `LLM_MODEL` | 模型 ID，默认 `auto` |
+| `TTS_CONCURRENCY` | 同时在飞的 TTS 请求上限，默认 `4`（调高需自行确认服务端限流阈值） |
+| `TTS_RATE_LIMIT_RETRIES` | 触发限流后的退避重试次数，默认 `4` |
+| `INTERMEDIATE_KEEP_HOURS` | 试听缓存保留时长（小时），默认 `24` |
+| `CLEANUP_INTERVAL_HOURS` | 清理扫描间隔（小时），默认 `6` |
 
 **请勿将 `.env` 或真实 Key 提交到 Git。** 详见 [SECURITY.md](SECURITY.md)。
 
@@ -86,7 +90,8 @@ npm run dev
 2. 手写脚本，或「AI 写稿」；可用「口语化 / 压短 / 润色」
 3. 配置主播音色，用「试听」确认
 4. 可选填写片头片尾 → 「合成新版本」→ 确认预估
-5. 失败句可「仅重试」；完成后导出 MP3 / SRT / MD
+5. 合成中可随时「停止」；失败句可「仅重试」。**已成功的句子会按配置指纹复用，不会重做**
+6. 完成后导出 MP3 / SRT / MD
 
 脚本格式示例：
 

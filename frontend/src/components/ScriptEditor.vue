@@ -5,6 +5,16 @@
         <span class="studio-mono">{{ lineCount }} lines</span>
       </div>
       <div class="toolbar-right">
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :loading="rewriting === 'perform'"
+          @click="rewrite('perform')"
+        >
+          演绎化
+        </el-button>
+        <el-divider direction="vertical" />
         <el-button size="small" :loading="rewriting === 'colloquial'" @click="rewrite('colloquial')">
           口语化
         </el-button>
@@ -62,12 +72,37 @@ function insertTag(tag) {
   emit('update:modelValue', newText)
 }
 
+const REWRITE_SUCCESS = {
+  perform: '已演绎化：长句已拆短并加入语气提示，可直接合成',
+  colloquial: '已口语化',
+  shorten: '已压短，可继续手改',
+  polish: '已润色',
+}
+
 async function rewrite(action) {
   const script = (props.modelValue || '').trim()
   if (script.length < 10) {
     ElMessage.warning('请先写一点脚本内容')
     return
   }
+
+  if (action === 'perform') {
+    // 演绎化会重排整篇结构（拆句、加标签、整理段落），破坏性最强，先确认
+    try {
+      await ElMessageBox.confirm(
+        '将由 AI 重排整篇稿子：拆短长句、加入语气与停顿提示、整理段落。原稿会被覆盖，建议先自行备份。',
+        '演绎化整篇脚本？',
+        {
+          type: 'info',
+          confirmButtonText: '开始演绎化',
+          cancelButtonText: '取消',
+        }
+      )
+    } catch {
+      return
+    }
+  }
+
   let ratio = null
   if (action === 'shorten') {
     try {
@@ -102,9 +137,7 @@ async function rewrite(action) {
       ratio,
     })
     emit('update:modelValue', res.data.script)
-    ElMessage.success(
-      action === 'shorten' ? '已压短，可继续手改' : action === 'polish' ? '已润色' : '已口语化'
-    )
+    ElMessage.success(REWRITE_SUCCESS[action] || '已处理')
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '改写失败，请检查 LLM 设置')
   } finally {

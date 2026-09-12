@@ -2,14 +2,15 @@
 import re
 import json
 import os
+import time
+import hashlib
 import asyncio
 import logging
 import threading
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -26,13 +27,25 @@ from app.schemas.episode import (
 from app.services.tts_service import TTSService
 from app.services.audio import AudioService
 from app.services.llm import friendly_error
-from app.config import AUDIO_DIR
+from app.services import task_runner
+from app.config import (
+    AUDIO_DIR,
+    SILENCE_GAP_MS,
+    SILENCE_GAP_SHORT_MS,
+    GAP_LEVEL_TO_MS,
+    GAP_NONE,
+    GAP_SHORT,
+    GAP_PARAGRAPH,
+    GAP_SECTION,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/podcast", tags=["podcast"])
 
 MAX_DIALOGUE_LINES = 200
 PROCESSING_STALE_MINUTES = 45
+# 连续多少句失败即判定为系统性问题（例如密钥失效、服务不可用），中止剩余分句以免空耗额度
+FAIL_FAST_THRESHOLD = 3
 
 # 每集一把进程内锁，防止并发双开合成
 _episode_locks: dict[int, threading.Lock] = {}
@@ -58,25 +71,62 @@ def _ensure_under_dir(path: str | None, root: Path) -> bool:
 
 
 def parse_dialogue_lines(script: str) -> list[dict]:
-    lines = [l.strip() for l in script.strip().split("\n") if l.strip()]
+    """把脚本解析成台词列表，并标注每句之后应留出的停顿层级。
+
+    停顿层级完全由脚本结构决定：普通换行 = 句间，空行 = 段落，【章节】= 章节。
+    这样合并与字幕才能做出有层次的停顿，而不是从头到尾同一个值
+    （单一停顿是「AI 播客听起来平」的主要来源）。
+
+    这里**不做截断**：原实现直接 `dialogue[:MAX_DIALOGUE_LINES]`，超出 200 句的部分
+    被静默丢弃，用户会以为整篇都合成了。超限改由 assert_within_line_limit 显式报错。
+    """
+    raw = script.split("\n")
+    total = len(raw)
+    entries: list[list] = []  # [line, gap_level]
+    for i, raw_line in enumerate(raw):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^【[^】]+】$", line) or line.startswith("---"):
+            # 章节分隔：把它前面那句的停顿升级为章节级
+            if entries:
+                entries[-1][1] = GAP_SECTION
+            continue
+        # 向后看一行，判断这句之后是句间、段落还是章节
+        gap = GAP_SHORT
+        if i + 1 < total:
+            nxt = raw[i + 1].strip()
+            if not nxt:
+                gap = GAP_PARAGRAPH
+            elif re.match(r"^【[^】]+】$", nxt) or nxt.startswith("---"):
+                gap = GAP_SECTION
+        entries.append([line, gap])
+
     dialogue = []
-    for line in lines:
-        if re.match(r"^【[^】]+】$", line):
-            continue
-        if line.startswith("---"):
-            continue
+    for line, gap in entries:
         match = re.match(r"^(.+?)[：:]\s*(.+)$", line)
         if match:
-            speaker = match.group(1).strip()
+            speaker = re.sub(r"^【[^】]+】", "", match.group(1).strip()).strip()
             content = match.group(2).strip()
-            speaker = re.sub(r"^【[^】]+】", "", speaker).strip()
             if not content:
                 continue
-            dialogue.append({"speaker": speaker, "text": content})
+            dialogue.append({"speaker": speaker, "text": content, "gap_after": gap})
         else:
             if not line.startswith("【"):
-                dialogue.append({"speaker": "", "text": line})
-    return dialogue[:MAX_DIALOGUE_LINES]
+                dialogue.append({"speaker": "", "text": line, "gap_after": gap})
+
+    # 最后一句之后没有内容了，不需要停顿
+    if dialogue:
+        dialogue[-1]["gap_after"] = GAP_NONE
+    return dialogue
+
+
+def assert_within_line_limit(dialogue: list[dict]) -> None:
+    if len(dialogue) > MAX_DIALOGUE_LINES:
+        raise ValueError(
+            f"脚本解析出 {len(dialogue)} 句，超过单集上限 {MAX_DIALOGUE_LINES} 句，"
+            "请拆成多集后再合成"
+        )
 
 
 def extract_speakers(dialogue: list[dict]) -> list[str]:
@@ -134,6 +184,42 @@ def _model_type_str(config: HostConfig) -> str:
     return mt.value if hasattr(mt, "value") else str(mt)
 
 
+def _config_fingerprint(
+    config: HostConfig,
+    global_instruction: str | None,
+    text: str,
+    speaker: str,
+) -> str:
+    """把「决定这条音频听感」的全部输入压成一个指纹。
+
+    指纹一致 => 该句音频可以原样复用，跳过 TTS 调用；
+    音色 / 风格 / 参考音频 / 全局指令 / 文本 任一变化，指纹即改变，该句重做。
+    """
+    reference = config.reference_audio
+    reference_mtime = None
+    if reference:
+        try:
+            reference_mtime = os.path.getmtime(reference)
+        except OSError:
+            reference_mtime = None
+    payload = {
+        "model_type": _model_type_str(config),
+        "voice_id": config.voice_id,
+        "reference_audio": reference,
+        "reference_audio_mtime": reference_mtime,
+        "voice_description": config.voice_description,
+        "style": config.style,
+        "speed": config.speed,
+        "emotion": config.emotion,
+        "audio_tag_style": config.audio_tag_style,
+        "global_instruction": global_instruction,
+        "speaker": speaker,
+        "text": text,
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 async def _run_synthesis(episode_id: int) -> None:
     """后台合成：分句落盘，失败可续跑，全部成功后再合并"""
     lock = _episode_lock(episode_id)
@@ -157,20 +243,32 @@ async def _run_synthesis(episode_id: int) -> None:
         dialogue_lines = parse_dialogue_lines(episode.script)
         if not dialogue_lines:
             raise ValueError("脚本为空或无法解析出有效台词")
+        assert_within_line_limit(dialogue_lines)
 
         seg_dir = _segment_dir(episode_id)
+        previous = _load_segments(episode)
         existing = {
             s.get("index"): s
-            for s in _load_segments(episode)
+            for s in previous
             if isinstance(s.get("index"), int)
         }
+        previous_meta = {
+            s.get("kind"): s for s in previous if s.get("kind") in ("intro", "outro")
+        }
+        # 每句生效的主播配置：构建与合成两个阶段共用，避免重复计算
+        seg_hosts = [
+            _pick_host_config(line["speaker"], host_a, host_b) for line in dialogue_lines
+        ]
 
         segments: list[dict] = []
         for i, line in enumerate(dialogue_lines):
             prev = existing.get(i)
-            # 脚本变了则作废旧句
-            same_text = prev and prev.get("text") == line["text"] and prev.get("speaker") == line["speaker"]
-            audio_path = prev.get("audio_path") if same_text else None
+            fingerprint = _config_fingerprint(
+                seg_hosts[i], episode.global_instruction, line["text"], line["speaker"]
+            )
+            # 指纹一致且文件仍在 => 复用旧音频，这一句不再请求 TTS
+            reusable = bool(prev) and prev.get("fingerprint") == fingerprint
+            audio_path = prev.get("audio_path") if reusable else None
             if audio_path and not Path(audio_path).exists():
                 audio_path = None
             status = "done" if audio_path else "pending"
@@ -181,6 +279,11 @@ async def _run_synthesis(episode_id: int) -> None:
                 "audio_path": audio_path,
                 "status": status,
                 "error": None,
+                "fingerprint": fingerprint,
+                # 这句之后应留的停顿：由脚本结构（句间 / 段落 / 章节）决定
+                "gap_after_ms": GAP_LEVEL_TO_MS.get(
+                    int(line.get("gap_after", GAP_SHORT)), SILENCE_GAP_MS
+                ),
             })
 
         intro_text = (episode.intro_text or "").strip()
@@ -192,14 +295,43 @@ async def _run_synthesis(episode_id: int) -> None:
         episode.status = "processing"
         episode.progress_total = len(segments) + (1 if has_intro else 0) + (1 if has_outro else 0)
         done_lines = sum(1 for s in segments if s["status"] == "done")
-        intro_state = {"kind": "intro", "text": intro_text, "status": "pending", "audio_path": None, "error": None}
-        outro_state = {"kind": "outro", "text": outro_text, "status": "pending", "audio_path": None, "error": None}
+        intro_state = {
+            "kind": "intro",
+            "text": intro_text,
+            "status": "pending",
+            "audio_path": None,
+            "error": None,
+            "fingerprint": _config_fingerprint(
+                host_a, episode.global_instruction, intro_text, "__intro__"
+            ),
+        }
+        outro_state = {
+            "kind": "outro",
+            "text": outro_text,
+            "status": "pending",
+            "audio_path": None,
+            "error": None,
+            "fingerprint": _config_fingerprint(
+                host_a, episode.global_instruction, outro_text, "__outro__"
+            ),
+        }
         intro_file = seg_dir / "intro.wav"
         outro_file = seg_dir / "outro.wav"
-        if has_intro and intro_file.exists() and intro_file.stat().st_size > 0:
+
+        def _meta_reusable(state: dict, target: Path) -> bool:
+            """片头/片尾同样按指纹判断：配置没变且文件在，就不重新合成。"""
+            prev = previous_meta.get(state["kind"])
+            return (
+                bool(prev)
+                and prev.get("fingerprint") == state["fingerprint"]
+                and target.exists()
+                and target.stat().st_size > 0
+            )
+
+        if has_intro and _meta_reusable(intro_state, intro_file):
             intro_state["status"] = "done"
             intro_state["audio_path"] = str(intro_file)
-        if has_outro and outro_file.exists() and outro_file.stat().st_size > 0:
+        if has_outro and _meta_reusable(outro_state, outro_file):
             outro_state["status"] = "done"
             outro_state["audio_path"] = str(outro_file)
 
@@ -224,6 +356,7 @@ async def _run_synthesis(episode_id: int) -> None:
         tts = TTSService()
 
         async def _synth_io(state: dict, dest: Path) -> str:
+            # 片头/片尾固定沿用主播 A 的音色配置（当前 UI 未提供单独选择项）
             path = await tts.synthesize(
                 text=state["text"],
                 model_type=_model_type_str(host_a),
@@ -234,6 +367,7 @@ async def _run_synthesis(episode_id: int) -> None:
                 speed=host_a.speed,
                 emotion=host_a.emotion,
                 global_instruction=episode.global_instruction,
+                audio_tag_style=host_a.audio_tag_style,
                 dest_dir=seg_dir,
             )
             if Path(path) != dest:
@@ -241,6 +375,8 @@ async def _run_synthesis(episode_id: int) -> None:
             return str(dest)
 
         if has_intro and intro_state["status"] != "done":
+            if task_runner.is_cancelled(episode_id):
+                raise asyncio.CancelledError()
             try:
                 intro_state["audio_path"] = await _synth_io(intro_state, intro_file)
                 intro_state["status"] = "done"
@@ -255,50 +391,91 @@ async def _run_synthesis(episode_id: int) -> None:
             episode.progress_current = done_lines + 1 + (1 if outro_state["status"] == "done" else 0)
             _persist()
 
-        for seg in segments:
-            if seg["status"] == "done":
-                continue
-            config = _pick_host_config(seg["speaker"], host_a, host_b)
-            try:
-                out_name = f"{seg['index']:03d}.wav"
-                audio_path = await tts.synthesize(
-                    text=seg["text"],
-                    model_type=_model_type_str(config),
-                    voice_id=config.voice_id,
-                    reference_audio=config.reference_audio,
-                    voice_description=config.voice_description,
-                    style=config.style,
-                    speed=config.speed,
-                    emotion=config.emotion,
-                    global_instruction=episode.global_instruction,
-                    audio_tag_style=config.audio_tag_style,
-                    dest_dir=seg_dir,
-                )
-                final_seg = seg_dir / out_name
-                if Path(audio_path) != final_seg:
-                    Path(audio_path).replace(final_seg)
-                    audio_path = str(final_seg)
-                seg["audio_path"] = audio_path
-                seg["status"] = "done"
-                seg["error"] = None
-            except Exception as seg_err:
-                logger.warning("分句 %s 失败: %s", seg["index"], seg_err)
-                seg["status"] = "error"
-                seg["error"] = friendly_error(seg_err)
-                episode.status = "error"
-                episode.error_message = f"第 {seg['index'] + 1} 句失败：{seg['error']}"
-                done_lines = sum(1 for s in segments if s["status"] == "done")
-                episode.progress_current = done_lines + (
-                    1 if intro_state["status"] == "done" else 0
-                ) + (1 if outro_state["status"] == "done" else 0)
-                _persist()
-                return
+        intro_done = 1 if intro_state["status"] == "done" else 0
+        outro_done = 1 if outro_state["status"] == "done" else 0
 
+        def _update_progress() -> None:
             done_lines = sum(1 for s in segments if s["status"] == "done")
-            episode.progress_current = done_lines + (
-                1 if intro_state["status"] == "done" else 0
-            ) + (1 if outro_state["status"] == "done" else 0)
+            episode.progress_current = done_lines + intro_done + outro_done
+
+        pending = [s for s in segments if s["status"] != "done"]
+
+        if pending:
+
+            async def _synth_one(seg: dict) -> tuple[dict, str | None, str | None]:
+                """合成单句。异常在内部收拢成 (seg, None, error)，便于并发收结果。"""
+                config = seg_hosts[seg["index"]]
+                try:
+                    produced = await tts.synthesize(
+                        text=seg["text"],
+                        model_type=_model_type_str(config),
+                        voice_id=config.voice_id,
+                        reference_audio=config.reference_audio,
+                        voice_description=config.voice_description,
+                        style=config.style,
+                        speed=config.speed,
+                        emotion=config.emotion,
+                        global_instruction=episode.global_instruction,
+                        audio_tag_style=config.audio_tag_style,
+                        dest_dir=seg_dir,
+                    )
+                    target = seg_dir / f"{seg['index']:03d}.wav"
+                    if Path(produced) != target:
+                        Path(produced).replace(target)
+                    return seg, str(target), None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    return seg, None, friendly_error(e)
+
+            # 并发下发所有待合成句；实际同时在飞的数量由 TTSService 的闸门约束
+            tasks = [asyncio.create_task(_synth_one(s)) for s in pending]
+            consecutive_failures = 0
+            try:
+                for finished in asyncio.as_completed(tasks):
+                    if task_runner.is_cancelled(episode_id):
+                        logger.info("单集 %s 收到取消信号，停止后续分句", episode_id)
+                        raise asyncio.CancelledError()
+                    seg, path, err = await finished
+                    if err:
+                        logger.warning("分句 %s 失败: %s", seg["index"], err)
+                        seg["status"] = "error"
+                        seg["error"] = err
+                        consecutive_failures += 1
+                    else:
+                        seg["audio_path"] = path
+                        seg["status"] = "done"
+                        seg["error"] = None
+                        consecutive_failures = 0
+                    # 进度与落库统一在主协程串行处理，避免多个协程并发写同一个 session
+                    _update_progress()
+                    _persist()
+                    if consecutive_failures >= FAIL_FAST_THRESHOLD:
+                        logger.warning(
+                            "单集 %s 连续 %d 句失败，判定为系统性问题，中止剩余分句",
+                            episode_id,
+                            consecutive_failures,
+                        )
+                        break
+            finally:
+                # 中止或取消时回收尚未完成的请求
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 有失败分句则如实上报；已成功的句子保留，可直接续跑
+        failed = [s for s in segments if s["status"] == "error"]
+        if failed:
+            first = failed[0]
+            episode.status = "error"
+            episode.error_message = (
+                f"{len(failed)} 句合成失败（首条：第 {first['index'] + 1} 句 {first['error']}），"
+                "可直接续跑，已成功的句子不会重做"
+            )
+            _update_progress()
             _persist()
+            return
 
         if has_outro and outro_state["status"] != "done":
             try:
@@ -324,10 +501,12 @@ async def _run_synthesis(episode_id: int) -> None:
             audio.merge_audio,
             paths,
             output_name,
-            600,
+            SILENCE_GAP_MS,
             True,
             intro_state["audio_path"] if has_intro else None,
             outro_state["audio_path"] if has_outro else None,
+            # 逐句停顿：段落与章节处会明显更长，做出呼吸感
+            [s.get("gap_after_ms") for s in segments],
         )
 
         episode.audio_path = final_path
@@ -336,6 +515,19 @@ async def _run_synthesis(episode_id: int) -> None:
         episode.error_message = None
         _persist()
         logger.info("单集 %s 合成完成（%d 句）", episode_id, len(segments))
+    except asyncio.CancelledError:
+        # 用户主动停止：已合成的分句均已落盘，稍后可直接续跑
+        logger.info("单集 %s 合成被取消", episode_id)
+        try:
+            episode = db.query(Episode).filter(Episode.id == episode_id).first()
+            if episode:
+                episode.status = "cancelled"
+                episode.error_message = None
+                episode.processing_heartbeat = datetime.utcnow()
+                db.commit()
+        except Exception:
+            db.rollback()
+        raise
     except Exception as e:
         logger.exception("单集 %s 合成失败", episode_id)
         episode = db.query(Episode).filter(Episode.id == episode_id).first()
@@ -460,6 +652,9 @@ def parse_script(data: dict):
     return {
         "speakers": speakers,
         "total_lines": len(dialogue),
+        "max_lines": MAX_DIALOGUE_LINES,
+        # 让前端在编辑阶段就能提示超限，不必等到合成时才失败
+        "over_limit": len(dialogue) > MAX_DIALOGUE_LINES,
         "dialogue": dialogue[:80],
     }
 
@@ -468,8 +663,7 @@ def _reclaim_if_stale(episode: Episode) -> bool:
     """进程被杀导致 processing 卡死时，超时后允许重新合成"""
     if episode.status != "processing":
         return False
-    lock = _episode_lock(episode.id)
-    if lock.locked():
+    if task_runner.is_running(episode.id) or _episode_lock(episode.id).locked():
         return False
     hb = episode.processing_heartbeat
     if not hb:
@@ -485,17 +679,22 @@ def _assert_not_busy(episode: Episode) -> None:
 @router.post("/synthesize")
 async def synthesize_episode(
     data: SynthesizeRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     episode = db.query(Episode).filter(Episode.id == data.episode_id).first()
     if not episode:
         raise HTTPException(status_code=404, detail="单集不存在")
     _assert_not_busy(episode)
+    if task_runner.is_running(episode.id):
+        raise HTTPException(status_code=409, detail="该单集已有合成任务在运行")
 
     dialogue_lines = parse_dialogue_lines(episode.script)
     if not dialogue_lines:
         raise HTTPException(status_code=400, detail="脚本为空或无法解析出有效台词")
+    try:
+        assert_within_line_limit(dialogue_lines)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     extra = (1 if (episode.intro_text or "").strip() else 0) + (
         1 if (episode.outro_text or "").strip() else 0
@@ -504,11 +703,13 @@ async def synthesize_episode(
     episode.progress_current = 0
     episode.progress_total = len(dialogue_lines) + extra
     episode.error_message = None
-    episode.segments_json = None
     episode.processing_heartbeat = datetime.utcnow()
+    # 刻意保留既有 segments_json：_run_synthesis 会按配置指纹复用未变化的句子，
+    # 否则「只改一句话」也会导致整篇重新合成。
     db.commit()
 
-    background_tasks.add_task(_run_synthesis, episode.id)
+    # is_running 与 start 之间没有 await，不会被并发请求插入，故必然启动成功
+    task_runner.start(episode.id, _run_synthesis(episode.id))
     return {
         "message": "合成已开始",
         "episode_id": episode.id,
@@ -518,9 +719,17 @@ async def synthesize_episode(
 
 
 def estimate_duration_seconds(lines: list[dict], chars_per_second: float = 4.2) -> int:
-    """粗估成片时长：中文约 4 字/秒 + 每句 0.45s 停顿"""
+    """粗估成片时长：中文约 4 字/秒 + 逐句停顿（分级 gap 优先，否则回退句均值）"""
     total_chars = sum(len(l.get("text") or "") for l in lines)
-    return int(total_chars / chars_per_second + len(lines) * 0.45)
+    gap_ms = 0.0
+    for i, line in enumerate(lines):
+        if i == len(lines) - 1:
+            break  # 末句之后不停顿
+        if "gap_after_ms" in line and line["gap_after_ms"] is not None:
+            gap_ms += float(line["gap_after_ms"])
+        else:
+            gap_ms += SILENCE_GAP_SHORT_MS
+    return int(total_chars / chars_per_second + gap_ms / 1000.0)
 
 
 @router.post("/episodes/{episode_id}/estimate")
@@ -532,6 +741,10 @@ def estimate_synthesis(episode_id: int, db: Session = Depends(get_db)):
     lines = parse_dialogue_lines(episode.script)
     if not lines:
         raise HTTPException(status_code=400, detail="脚本为空或无法解析出有效台词")
+    try:
+        assert_within_line_limit(lines)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     total_chars = sum(len(l["text"]) for l in lines)
     return {
         "total_lines": len(lines),
@@ -544,14 +757,15 @@ def estimate_synthesis(episode_id: int, db: Session = Depends(get_db)):
 @router.post("/episodes/{episode_id}/retry")
 async def retry_synthesis(
     episode_id: int,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """失败后从断点继续：只重合成未完成/失败句，成功句复用"""
+    """失败/中止后从断点继续：只重合成未完成句，已成功的句子按指纹复用"""
     episode = db.query(Episode).filter(Episode.id == episode_id).first()
     if not episode:
         raise HTTPException(status_code=404, detail="单集不存在")
     _assert_not_busy(episode)
+    if task_runner.is_running(episode_id):
+        raise HTTPException(status_code=409, detail="该单集已有合成任务在运行")
 
     segments = _load_segments(episode)
     if not segments:
@@ -565,11 +779,31 @@ async def retry_synthesis(
     episode.processing_heartbeat = datetime.utcnow()
     db.commit()
 
-    background_tasks.add_task(_run_synthesis, episode.id)
+    task_runner.start(episode_id, _run_synthesis(episode_id))
     return {
         "message": "已开始续跑",
         "episode_id": episode.id,
         "pending_lines": pending,
+    }
+
+
+@router.post("/episodes/{episode_id}/cancel")
+async def cancel_synthesis(episode_id: int, db: Session = Depends(get_db)):
+    """停止正在进行的合成。已完成的分句会保留，之后可用 retry 续跑。"""
+    episode = db.query(Episode).filter(Episode.id == episode_id).first()
+    if not episode:
+        raise HTTPException(status_code=404, detail="单集不存在")
+
+    stopped = task_runner.cancel(episode_id)
+    if episode.status == "processing":
+        episode.status = "cancelled"
+        episode.error_message = None
+        db.commit()
+
+    return {
+        "episode_id": episode_id,
+        "cancelled": stopped,
+        "message": "已停止合成，已完成的分句会保留" if stopped else "当前没有正在运行的合成任务",
     }
 
 
@@ -591,7 +825,9 @@ async def preview_sentence(data: PreviewSentenceRequest):
             global_instruction=data.global_instruction,
             audio_tag_style=data.audio_tag_style,
         )
-    except ValueError as e:
+    except (ValueError, OSError) as e:
+        # 一并捕获 OSError：克隆模式下参考音频丢失时抛的是 FileNotFoundError，
+        # 原实现只认 ValueError / RuntimeError，会漏成 500「服务器内部错误」。
         raise HTTPException(status_code=400, detail=friendly_error(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=friendly_error(e))
@@ -650,8 +886,20 @@ def export_srt(episode_id: int, db: Session = Depends(get_db)):
     segments = _load_segments(episode)
     if not segments:
         raise HTTPException(status_code=400, detail="尚无分句数据，请先合成")
+    # 字幕时间轴要与实际拼接一致：正文之外还要算上片头时长与句间停顿，
+    # 否则偏移会随句数累积（第 N 句约偏 0.6×(N-1) 秒）。
+    body = [s for s in segments if isinstance(s.get("index"), int)]
+    if not body:
+        raise HTTPException(status_code=400, detail="尚无分句数据，请先合成")
+    intro = next((s for s in segments if s.get("kind") == "intro"), None)
+    outro = next((s for s in segments if s.get("kind") == "outro"), None)
     audio = AudioService()
-    srt = audio.build_srt(segments)
+    srt = audio.build_srt(
+        body,
+        silence_gap_ms=SILENCE_GAP_MS,
+        intro_duration_ms=audio.wav_duration_ms(intro.get("audio_path")) if intro else 0,
+        has_outro=bool(outro and outro.get("audio_path")),
+    )
     return PlainTextResponse(
         srt,
         media_type="text/plain; charset=utf-8",

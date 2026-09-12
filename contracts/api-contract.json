@@ -1,0 +1,121 @@
+{
+  "$comment": "前后端 API 契约单一来源：后端 test_contract.py 与前端 contract.spec.js 共同读取",
+  "host_config_fields": [
+    "model_type",
+    "voice_id",
+    "reference_audio",
+    "voice_description",
+    "style",
+    "speed",
+    "emotion",
+    "audio_tag_style",
+    "speaker_names"
+  ],
+  "model_types": ["builtin", "design", "clone"],
+  "episode_status": ["draft", "processing", "done", "error"],
+  "endpoints": {
+    "GET /": {
+      "required_keys": ["message", "version"]
+    },
+    "GET /api/settings": {
+      "required_keys": [
+        "api_key_set",
+        "base_url",
+        "masked_key",
+        "llm_api_key_set",
+        "llm_base_url",
+        "llm_model",
+        "masked_llm_key"
+      ]
+    },
+    "PUT /api/settings": {
+      "required_keys": ["message"]
+    },
+    "GET /api/voices/meta": {
+      "required_keys": ["styles", "speeds", "audio_tags", "inline_tags", "model_types", "model_ids"]
+    },
+    "GET /api/voices/builtin": {
+      "required_keys": ["voices"],
+      "item_keys": ["id", "name", "lang", "gender"]
+    },
+    "GET /api/voices/presets": {
+      "required_keys": ["presets"]
+    },
+    "POST /api/projects": {
+      "required_keys": [
+        "id",
+        "name",
+        "mode",
+        "created_at",
+        "updated_at",
+        "episode_count",
+        "done_count",
+        "error_count",
+        "last_status"
+      ]
+    },
+    "GET /api/projects": {
+      "required_keys": ["projects", "total"],
+      "item_keys": [
+        "id",
+        "name",
+        "mode",
+        "episode_count",
+        "done_count",
+        "error_count",
+        "last_status"
+      ]
+    },
+    "POST /api/podcast/parse-script": {
+      "required_keys": ["speakers", "total_lines", "dialogue"],
+      "dialogue_item_keys": ["speaker", "text"]
+    },
+    "POST /api/podcast/episodes": {
+      "required_keys": [
+        "id",
+        "project_id",
+        "script",
+        "status",
+        "progress_current",
+        "progress_total",
+        "intro_text",
+        "outro_text",
+        "created_at"
+      ]
+    },
+    "GET /api/podcast/episodes/{id}/status": {
+      "required_keys": [
+        "id",
+        "status",
+        "progress_current",
+        "progress_total",
+        "error_message",
+        "audio_path",
+        "segments",
+        "failed_count",
+        "done_count"
+      ]
+    },
+    "POST /api/podcast/episodes/{id}/estimate": {
+      "required_keys": [
+        "total_lines",
+        "total_chars",
+        "estimated_seconds",
+        "dialogue_preview"
+      ]
+    },
+    "POST /api/script/generate": {
+      "required_keys": ["script"]
+    },
+    "POST /api/script/rewrite": {
+      "required_keys": ["script"]
+    },
+    "POST /api/podcast/preview-sentence": {
+      "required_keys": ["audio_path"]
+    }
+  },
+  "frontend_audio_url": {
+    "episode_file_pattern": "^/audio/[^/]+\\.wav$",
+    "segment_file_pattern": "^/api/podcast/segments/\\d+/[\\w.-]+\\.wav$"
+  }
+}

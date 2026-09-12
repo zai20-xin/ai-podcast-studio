@@ -30,9 +30,11 @@ npm run dev
 ## 提交前
 
 ```bash
-cd backend && python -m unittest tests.test_core -v
-cd frontend && npm run build
+cd backend && python -m unittest discover -s tests -v
+cd frontend && npm test && npm run build
 ```
+
+修改 API 响应字段时，请同步 `contracts/api-contract.json`，契约测试会校验前后端一致。
 
 ## Pull Request
 

@@ -107,10 +107,19 @@ data/       运行时音频与数据库（默认不入库）
 
 ## 测试
 
+三类测试均不依赖真实 TTS/LLM 密钥（契约与校验路径）：
+
 ```bash
+# 后端单元 + API + 契约（backend/tests）
 cd backend
-.venv/bin/python -m unittest tests.test_core -v
+.venv/bin/python -m unittest discover -s tests -v
+
+# 前端单元 + 契约（frontend/tests，Vitest）
+cd frontend
+npm test
 ```
+
+契约单一来源：`contracts/api-contract.json`（后端 `test_contract.py` 与前端 `contract.spec.js` 共同校验）。
 
 ## 安全与限制
 

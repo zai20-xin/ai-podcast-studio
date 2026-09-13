@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from weakref import WeakKeyDictionary
 
-from openai import AsyncOpenAI, APIError, APIConnectionError, APITimeoutError, RateLimitError
+from openai import APIError, APIConnectionError, APITimeoutError, RateLimitError
 
 from app.config import (
     AUDIO_DIR,
@@ -24,6 +24,7 @@ from app.config import (
     MAX_REFERENCE_AUDIO_B64_BYTES,
     runtime_config,
 )
+from app.providers import create_async_client, get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +100,6 @@ def convert_tags(text: str) -> str:
     return result
 
 
-class AsyncMimoOpenAI(AsyncOpenAI):
-    @property
-    def auth_headers(self) -> dict[str, str]:
-        return {"api-key": self.api_key}
-
-
 # 并发闸门：按事件循环缓存，使同一进程内所有 TTSService 实例共享同一个并发上限。
 # TTSService 是「每次请求新建」的，若把信号量挂在实例上则完全起不到限制作用。
 # 用 WeakKeyDictionary：loop 结束后自动回收，避免 id(loop) 复用拿到陈旧 Semaphore。
@@ -122,13 +117,25 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 class TTSService:
     def __init__(self):
+        provider_id = runtime_config.tts_provider or "mimo"
+        spec = get_provider("tts", provider_id)
+        self.provider_id = provider_id
         self.api_key = runtime_config.api_key
-        self.base_url = runtime_config.base_url or DEFAULT_BASE_URL
+        self.base_url = runtime_config.base_url or (spec.default_base_url if spec else DEFAULT_BASE_URL)
         if not self.api_key:
-            raise ValueError("需要配置 MIMO_API_KEY")
-        self.client = AsyncMimoOpenAI(
+            label = spec.name if spec else "TTS"
+            raise ValueError(f"需要配置 {label} 的 API Key（设置页可填）")
+        if spec and spec.status != "supported":
+            logger.warning(
+                "TTS 供应商 %s 状态为 %s：仅按 OpenAI 兼容协议适配，未完整验证",
+                provider_id,
+                spec.status,
+            )
+        self.client = create_async_client(
             api_key=self.api_key,
             base_url=self.base_url,
+            provider_id=provider_id,
+            kind="tts",
             timeout=TTS_TIMEOUT_SECONDS,
             max_retries=TTS_MAX_RETRIES,
         )

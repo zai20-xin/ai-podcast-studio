@@ -82,6 +82,9 @@ describe('API contract (frontend)', () => {
       'llm_base_url',
       'llm_model',
       'masked_llm_key',
+      'tts_provider',
+      'llm_provider',
+      'providers',
     ]) {
       expect(keys).toContain(k)
     }

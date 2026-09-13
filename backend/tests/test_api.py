@@ -44,8 +44,30 @@ class TestSettingsAPI(unittest.TestCase):
         r = self.c.get("/api/settings")
         self.assertEqual(r.status_code, 200)
         self.assertIn("api_key_set", r.json())
+        self.assertIn("tts_provider", r.json())
+        self.assertIn("providers", r.json())
+        self.assertTrue(any(p["id"] == "mimo" for p in r.json()["providers"]["tts"]))
         r = self.c.put("/api/settings", json={"base_url": "ftp://x"})
         self.assertEqual(r.status_code, 400)
+
+    def test_unknown_provider_rejected(self):
+        r = self.c.put("/api/settings", json={"tts_provider": "not-a-vendor"})
+        self.assertEqual(r.status_code, 400)
+        r = self.c.put("/api/settings", json={"llm_provider": "not-a-vendor"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_update_provider_persists(self):
+        from app.config import runtime_config
+
+        old = runtime_config.llm_provider
+        try:
+            r = self.c.put("/api/settings", json={"llm_provider": "openai"})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(runtime_config.llm_provider, "openai")
+            r = self.c.get("/api/settings")
+            self.assertEqual(r.json()["llm_provider"], "openai")
+        finally:
+            runtime_config.update(llm_provider=old or "freellmapi")
 
     def test_update_key_persists_to_env(self):
         """设置页写的 Key 必须落盘，否则重启后丢失。"""

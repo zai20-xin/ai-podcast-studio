@@ -25,7 +25,10 @@
         "llm_api_key_set",
         "llm_base_url",
         "llm_model",
-        "masked_llm_key"
+        "masked_llm_key",
+        "tts_provider",
+        "llm_provider",
+        "providers"
       ]
     },
     "PUT /api/settings": {

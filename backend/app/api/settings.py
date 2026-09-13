@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header, HTTPException
 
 from app.schemas.settings import SettingsUpdate, SettingsResponse
 from app.config import runtime_config, DEFAULT_BASE_URL, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL
+from app.providers import catalog_payload, get_provider
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -33,6 +34,13 @@ def _valid_http_url(url: str) -> bool:
         return False
 
 
+def _validate_provider(kind: str, provider_id: str | None) -> None:
+    if not provider_id:
+        return
+    if not get_provider(kind, provider_id):  # type: ignore[arg-type]
+        raise HTTPException(status_code=400, detail=f"未知的 {kind} 供应商: {provider_id}")
+
+
 @router.get("", response_model=SettingsResponse)
 def get_settings():
     return SettingsResponse(
@@ -43,6 +51,9 @@ def get_settings():
         llm_base_url=runtime_config.llm_base_url or DEFAULT_LLM_BASE_URL,
         llm_model=runtime_config.llm_model or DEFAULT_LLM_MODEL,
         masked_llm_key=mask_key(runtime_config.llm_api_key),
+        tts_provider=runtime_config.tts_provider,
+        llm_provider=runtime_config.llm_provider,
+        providers=catalog_payload(),
     )
 
 
@@ -56,11 +67,15 @@ def update_settings(
         raise HTTPException(status_code=400, detail="Base URL 必须是 http(s) 地址")
     if data.llm_base_url and not _valid_http_url(data.llm_base_url):
         raise HTTPException(status_code=400, detail="LLM Base URL 必须是 http(s) 地址")
+    _validate_provider("tts", data.tts_provider)
+    _validate_provider("llm", data.llm_provider)
     runtime_config.update(
         api_key=data.api_key,
         base_url=data.base_url,
         llm_api_key=data.llm_api_key,
         llm_base_url=data.llm_base_url,
         llm_model=data.llm_model,
+        tts_provider=data.tts_provider,
+        llm_provider=data.llm_provider,
     )
     return {"message": "设置已更新"}

@@ -72,8 +72,10 @@ npm run dev
 
 | 变量 | 说明 |
 |------|------|
-| `MIMO_API_KEY` | MiMo TTS API Key（必填） |
-| `MIMO_BASE_URL` | TTS 接口地址 |
+| `TTS_PROVIDER` | TTS 供应商 ID，默认 `mimo` |
+| `MIMO_API_KEY` | 当前 TTS 供应商的 API Key（必填；历史环境变量名） |
+| `MIMO_BASE_URL` | 当前 TTS Base URL |
+| `LLM_PROVIDER` | 写稿 LLM 供应商 ID，默认 `freellmapi` |
 | `LLM_API_KEY` | 写稿 LLM Key（可选） |
 | `LLM_BASE_URL` | OpenAI 兼容 Base URL，默认 `http://localhost:3001/v1` |
 | `LLM_MODEL` | 模型 ID，默认 `auto` |
@@ -83,6 +85,43 @@ npm run dev
 | `CLEANUP_INTERVAL_HOURS` | 清理扫描间隔（小时），默认 `6` |
 
 **请勿将 `.env` 或真实 Key 提交到 Git。** 详见 [SECURITY.md](SECURITY.md)。
+
+## 供应商兼容层
+
+业务代码不绑定具体厂商，统一走 **OpenAI 兼容** `chat.completions`；差异收敛在：
+
+| 层 | 位置 | 职责 |
+|----|------|------|
+| 目录 | `backend/app/providers/catalog.py` | 供应商 ID、鉴权样式、默认 Base URL、supported/experimental |
+| 客户端 | `backend/app/providers/clients.py` | 按目录创建客户端（MiMo → `api-key` 头，其余 → Bearer） |
+| 服务 | `tts_service.py` / `llm.py` | 只拿 `create_*_client()`，不直接 new OpenAI SDK |
+
+### 当前支持状态（诚实标注）
+
+| 用途 | ID | 状态 | 说明 |
+|------|-----|------|------|
+| TTS | `mimo` | **supported** | 内置音色 / design / clone 完整主路径 |
+| TTS | `openai_compatible` | experimental | 仅协议适配；MiMo 音色 ID 与模型名仍硬编码，换厂大概率失败 |
+| LLM | `freellmapi` | **supported** | 本地/自建网关写稿主路径 |
+| LLM | `openai` | **supported** | 官方 Chat Completions |
+| LLM | `ollama` / `custom` | experimental | OpenAI 兼容端口，未逐一实测 |
+
+设置页会展示上述状态与接入说明；**不要把 experimental 当成开箱即用**。
+
+### 如何扩展新厂商
+
+1. 在 `catalog.py` 的 `TTS_PROVIDERS` 或 `LLM_PROVIDERS` 增加 `ProviderSpec`  
+2. 若鉴权不是 Bearer / `api-key`，在 `clients.py` 增加 auth 样式  
+3. 若需要专有模型 ID / 音色列表，在对应 service 里按 `provider_id` 分支  
+4. 更新本表与设置页提示，并补契约/单元测试  
+
+```env
+TTS_PROVIDER=mimo
+MIMO_API_KEY=...
+LLM_PROVIDER=freellmapi
+LLM_BASE_URL=http://localhost:3001/v1
+LLM_MODEL=auto
+```
 
 ## 使用摘要
 

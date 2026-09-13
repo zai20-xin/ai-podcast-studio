@@ -87,14 +87,25 @@ PODCAST_LUFS = -16.0
 
 
 class RuntimeConfig:
-    """可热更新的运行时配置"""
+    """可热更新的运行时配置。
+
+    凭证字段名仍沿用 MIMO_* / LLM_* 环境变量（历史兼容），
+    语义上已是「当前 TTS 供应商 / 当前 LLM 供应商」的通用凭证，
+    具体厂商由 tts_provider / llm_provider 决定鉴权方式与默认模型。
+    """
 
     def __init__(self) -> None:
+        self._tts_provider = os.environ.get("TTS_PROVIDER", "mimo")
         self._api_key = os.environ.get("MIMO_API_KEY", "")
         self._base_url = os.environ.get("MIMO_BASE_URL", DEFAULT_BASE_URL)
+        self._llm_provider = os.environ.get("LLM_PROVIDER", "freellmapi")
         self._llm_api_key = os.environ.get("LLM_API_KEY", "")
         self._llm_base_url = os.environ.get("LLM_BASE_URL", DEFAULT_LLM_BASE_URL)
         self._llm_model = os.environ.get("LLM_MODEL", DEFAULT_LLM_MODEL)
+
+    @property
+    def tts_provider(self) -> str:
+        return self._tts_provider or os.environ.get("TTS_PROVIDER", "mimo")
 
     @property
     def api_key(self) -> str:
@@ -103,6 +114,10 @@ class RuntimeConfig:
     @property
     def base_url(self) -> str:
         return self._base_url or os.environ.get("MIMO_BASE_URL", DEFAULT_BASE_URL)
+
+    @property
+    def llm_provider(self) -> str:
+        return self._llm_provider or os.environ.get("LLM_PROVIDER", "freellmapi")
 
     @property
     def llm_api_key(self) -> str:
@@ -123,9 +138,15 @@ class RuntimeConfig:
         llm_api_key: str | None = None,
         llm_base_url: str | None = None,
         llm_model: str | None = None,
+        tts_provider: str | None = None,
+        llm_provider: str | None = None,
     ) -> None:
         """热更新内存配置，并写回 backend/.env，避免进程重启后丢失。"""
         applied: dict[str, str] = {}
+        if tts_provider:
+            self._tts_provider = tts_provider
+            os.environ["TTS_PROVIDER"] = tts_provider
+            applied["TTS_PROVIDER"] = tts_provider
         if api_key:
             self._api_key = api_key
             os.environ["MIMO_API_KEY"] = api_key
@@ -134,6 +155,10 @@ class RuntimeConfig:
             self._base_url = base_url
             os.environ["MIMO_BASE_URL"] = base_url
             applied["MIMO_BASE_URL"] = base_url
+        if llm_provider:
+            self._llm_provider = llm_provider
+            os.environ["LLM_PROVIDER"] = llm_provider
+            applied["LLM_PROVIDER"] = llm_provider
         if llm_api_key:
             self._llm_api_key = llm_api_key
             os.environ["LLM_API_KEY"] = llm_api_key

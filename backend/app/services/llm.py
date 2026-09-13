@@ -1,9 +1,10 @@
-"""LLM 写稿服务（OpenAI 兼容）"""
+"""LLM 写稿服务（OpenAI 兼容，供应商见 app.providers）"""
 import logging
 
-from openai import OpenAI, APIError, APITimeoutError
+from openai import APIError, APITimeoutError
 
 from app.config import runtime_config, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, LLM_TIMEOUT_SECONDS
+from app.providers import create_sync_client, get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,24 @@ SYSTEM_PROMPT = """你是专业播客编剧。根据用户提供的大纲或文�
 
 class LLMService:
     def __init__(self) -> None:
+        provider_id = runtime_config.llm_provider or "freellmapi"
+        spec = get_provider("llm", provider_id)
         key = runtime_config.llm_api_key
         if not key:
-            raise ValueError("未配置 LLM API Key，请到「设置」中填写")
-        self.client = OpenAI(
+            label = spec.name if spec else "LLM"
+            raise ValueError(f"未配置 {label} 的 API Key，请到「设置」中填写")
+        if spec and spec.status != "supported":
+            logger.warning(
+                "LLM 供应商 %s 状态为 %s：OpenAI 兼容适配，未逐一实测",
+                provider_id,
+                spec.status,
+            )
+        self.provider_id = provider_id
+        self.client = create_sync_client(
             api_key=key,
-            base_url=runtime_config.llm_base_url or DEFAULT_LLM_BASE_URL,
+            base_url=runtime_config.llm_base_url or (spec.default_base_url if spec else DEFAULT_LLM_BASE_URL),
+            provider_id=provider_id,
+            kind="llm",
             timeout=LLM_TIMEOUT_SECONDS,
             max_retries=1,
         )

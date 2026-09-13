@@ -37,3 +37,8 @@ Thumbs.db
 # Local verify scratch / vite timestamp dumps
 backend/_verify*
 *.timestamp-*.mjs
+
+# 本地营销图 / 生成图，不进仓库
+/assets/
+/generated-*.png
+/edited-*.png

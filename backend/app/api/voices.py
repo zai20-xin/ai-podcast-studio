@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.voice import ClonedVoice
 from app.schemas.voice import ClonedVoiceResponse
-from app.config import VOICES_DIR, MAX_REFERENCE_AUDIO_BYTES
+from app.config import VOICES_DIR, MAX_REFERENCE_AUDIO_BYTES, runtime_config
+from app.providers import get_provider
 from app.services.presets import SCENE_PRESETS
+from app.services.edge_tts_engine import EDGE_VOICES, DEFAULT_EDGE_VOICE, DEFAULT_EDGE_VOICE_B
 from app.services.tts_service import (
     STYLE_PRESETS,
     SPEED_PRESETS,
@@ -60,25 +62,49 @@ def _voice_under_voices_dir(path: Path) -> bool:
         return False
 
 
+def _active_tts_spec():
+    return get_provider("tts", runtime_config.tts_provider or "mimo")
+
+
 @router.get("/builtin")
 def list_builtin_voices():
-    return {"voices": BUILTIN_VOICES}
+    spec = _active_tts_spec()
+    if (spec and spec.id == "edge-tts") or runtime_config.tts_provider == "edge-tts":
+        return {
+            "voices": EDGE_VOICES,
+            "provider": "edge-tts",
+            "defaults": {"A": DEFAULT_EDGE_VOICE, "B": DEFAULT_EDGE_VOICE_B},
+        }
+    return {
+        "voices": BUILTIN_VOICES,
+        "provider": runtime_config.tts_provider or "mimo",
+        "defaults": {"A": "冰糖", "B": "白桦"},
+    }
 
 
 @router.get("/meta")
 def list_tts_meta():
-    """前端单一数据源：风格/语速/标签/模型"""
+    """前端单一数据源：风格/语速/标签/模型/能力"""
+    spec = _active_tts_spec()
+    supported = list(spec.supported_model_types) if spec else ["builtin", "design", "clone"]
+    all_types = [
+        {"id": "builtin", "name": "内置音色"},
+        {"id": "design", "name": "声音设计"},
+        {"id": "clone", "name": "克隆音色"},
+    ]
     return {
         "styles": list(STYLE_PRESETS.keys()),
         "speeds": list(SPEED_PRESETS.keys()),
         "audio_tags": list(AUDIO_TAG_STYLE_PRESETS.keys()),
         "inline_tags": list(AUDIO_TAG_INLINE_PRESETS.keys()),
-        "model_types": [
-            {"id": "builtin", "name": "内置音色"},
-            {"id": "design", "name": "声音设计"},
-            {"id": "clone", "name": "克隆音色"},
-        ],
-        "model_ids": MODEL_IDS,
+        "model_types": [t for t in all_types if t["id"] in supported],
+        "model_ids": MODEL_IDS if "clone" in supported or "design" in supported else {},
+        "tts_provider": runtime_config.tts_provider or "mimo",
+        "capabilities": {
+            "builtin": "builtin" in supported,
+            "design": "design" in supported,
+            "clone": "clone" in supported,
+        },
     }
 
 

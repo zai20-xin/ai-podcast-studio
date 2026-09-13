@@ -37,6 +37,7 @@ from app.config import (
     GAP_SHORT,
     GAP_PARAGRAPH,
     GAP_SECTION,
+    runtime_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,8 @@ def _config_fingerprint(
         except OSError:
             reference_mtime = None
     payload = {
+        # 切换 TTS 供应商后不得复用旧分句：同一 voice_id 在不同引擎听感完全不同
+        "tts_provider": runtime_config.tts_provider,
         "model_type": _model_type_str(config),
         "voice_id": config.voice_id,
         "reference_audio": reference,

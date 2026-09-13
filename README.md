@@ -7,6 +7,7 @@
 ## 功能
 
 - **三种声音来源**：内置音色 / 文字描述声音设计 / 参考音频克隆
+- **免费开箱 TTS**：Edge TTS（无需 API Key）；完整能力用 MiMo TTS
 - **单人朗读 · 双人对谈**：角色识别与主播映射
 - **AI 写稿**：大纲/文章 → 口播脚本；口语化 / 压短 / 润色
 - **制作台**：项目与版本（Takes）、草稿自动保存、单句试听、分句失败续跑
@@ -61,7 +62,8 @@ npm run dev
 
 | 用途 | 获取方式 |
 |------|----------|
-| 语音合成 | [MiMo 控制台](https://platform.xiaomimimo.com/console/api-keys) |
+| 语音合成（免费） | **无需密钥**：设置里选「Edge TTS（免费）」即可试听与合成 |
+| 语音合成（完整） | [MiMo 控制台](https://platform.xiaomimimo.com/console/api-keys)（设计 / 克隆） |
 | 写稿 LLM | 任意 OpenAI 兼容服务；在「设置」中配置 Base URL / Key / 模型 |
 
 也可在应用内「设置」页直接填写（会写入 `backend/.env`，重启后端后仍然有效；不写入前端存储）。
@@ -72,9 +74,9 @@ npm run dev
 
 | 变量 | 说明 |
 |------|------|
-| `TTS_PROVIDER` | TTS 供应商 ID，默认 `mimo` |
-| `MIMO_API_KEY` | 当前 TTS 供应商的 API Key（必填；历史环境变量名） |
-| `MIMO_BASE_URL` | 当前 TTS Base URL |
+| `TTS_PROVIDER` | TTS 供应商 ID：`edge-tts` / `mimo` / `openai_compatible`；未设置时：有 Key 用 `mimo`，否则 `edge-tts` |
+| `MIMO_API_KEY` | 当前 TTS 供应商的 API Key（`mimo` 必填；`edge-tts` 无需；历史环境变量名） |
+| `MIMO_BASE_URL` | 当前 TTS Base URL（Edge TTS 忽略） |
 | `LLM_PROVIDER` | 写稿 LLM 供应商 ID，默认 `freellmapi` |
 | `LLM_API_KEY` | 写稿 LLM Key（可选） |
 | `LLM_BASE_URL` | OpenAI 兼容 Base URL，默认 `http://localhost:3001/v1` |
@@ -100,6 +102,7 @@ npm run dev
 
 | 用途 | ID | 状态 | 说明 |
 |------|-----|------|------|
+| TTS | `edge-tts` | **supported** | 免费、无需 Key；仅内置音色；微软在线服务 |
 | TTS | `mimo` | **supported** | 内置音色 / design / clone 完整主路径 |
 | TTS | `openai_compatible` | experimental | 仅协议适配；MiMo 音色 ID 与模型名仍硬编码，换厂大概率失败 |
 | LLM | `freellmapi` | **supported** | 本地/自建网关写稿主路径 |
@@ -127,7 +130,7 @@ LLM_MODEL=auto
 
 1. 新建项目（选定单人/双人，制作台内固定该模式）
 2. 手写脚本，或「AI 写稿」；可用「口语化 / 压短 / 润色」
-3. 配置主播音色，用「试听」确认
+3. 配置主播音色，用「试听」确认（未配置 MiMo Key 时默认 Edge TTS）
 4. 可选填写片头片尾 → 「合成新版本」→ 确认预估
 5. 合成中可随时「停止」；失败句可「仅重试」。**已成功的句子会按配置指纹复用，不会重做**
 6. 完成后导出 MP3 / SRT / MD

@@ -92,10 +92,75 @@ export const useEditorStore = defineStore('editor', () => {
   const previewLoading = ref(false)
   const previewUrl = ref('')
 
+  // ── TTS 供应商（全局设置，演播设定里快捷切换）──
+  const ttsProvider = ref('mimo')
+  const ttsProviders = ref([])
+  const ttsCapabilities = ref({ builtin: true, design: true, clone: true })
+  const ttsApiKeySet = ref(false)
+  const ttsBuiltinVoices = ref([])
+  const ttsDefaultVoices = ref({ A: null, B: null })
+  /** 供应商变化时递增；VoicePanel 据此重拉音色/能力 */
+  const ttsVoiceEpoch = ref(0)
+
   function bumpEpoch() {
     sessionEpoch.value += 1
     parseSeq += 1
     previewSeq += 1
+  }
+
+  function coerceHostsForTts() {
+    const caps = ttsCapabilities.value
+    const voices = ttsBuiltinVoices.value || []
+    const ids = new Set(voices.map((v) => v.id))
+    const fix = (host, channel) => {
+      if (!host) return
+      if (!caps[host.model_type || 'builtin']) {
+        host.model_type = 'builtin'
+        host.voice_description = ''
+        host.reference_audio = null
+      }
+      if (host.model_type === 'builtin') {
+        const fallback =
+          ttsDefaultVoices.value?.[channel] || voices[0]?.id || null
+        if (!host.voice_id || !ids.has(host.voice_id)) {
+          host.voice_id = fallback
+          if (fallback) rememberBuiltinVoice(channel, fallback)
+        }
+      }
+    }
+    fix(hostA, 'A')
+    fix(hostB, 'B')
+  }
+
+  async function loadTtsContext() {
+    const [settingsRes, voicesRes, metaRes] = await Promise.all([
+      api.get('/api/settings'),
+      api.get('/api/voices/builtin'),
+      api.get('/api/voices/meta'),
+    ])
+    const settings = settingsRes.data || {}
+    ttsProvider.value = settings.tts_provider || 'mimo'
+    ttsProviders.value = settings.providers?.tts || []
+    ttsApiKeySet.value = !!settings.api_key_set
+    ttsBuiltinVoices.value = voicesRes.data?.voices || []
+    ttsDefaultVoices.value = voicesRes.data?.defaults || { A: null, B: null }
+    ttsCapabilities.value = metaRes.data?.capabilities || {
+      builtin: true,
+      design: true,
+      clone: true,
+    }
+    return settings
+  }
+
+  async function switchTtsProvider(nextId) {
+    const next = String(nextId || '').trim()
+    if (!next || next === ttsProvider.value) return false
+    await api.put('/api/settings', { tts_provider: next })
+    ttsProvider.value = next
+    await loadTtsContext()
+    coerceHostsForTts()
+    ttsVoiceEpoch.value += 1
+    return true
   }
 
   function rememberBuiltinVoice(channel, voiceId) {
@@ -544,6 +609,9 @@ export const useEditorStore = defineStore('editor', () => {
     lastResumableEpisodeId, lastStoppedPending,
     draftSavedAt, draftCleared, projectId, introText, outroText, sessionEpoch,
     previewingKey, previewLoading, previewUrl,
+    ttsProvider, ttsProviders, ttsCapabilities, ttsApiKeySet,
+    ttsBuiltinVoices, ttsDefaultVoices, ttsVoiceEpoch,
+    loadTtsContext, switchTtsProvider, coerceHostsForTts,
     parseScript, synthesize, retrySynthesis, stopSynthesis, estimateSynthesis, reset, normalizeConfig,
     switchModelType, applyHostConfig, setMode, pruneSpeakerNames, ensureDefaultSpeakerMapping,
     rememberBuiltinVoice, pickHostForSpeaker, clearSegmentStatus,

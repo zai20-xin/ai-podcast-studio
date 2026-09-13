@@ -1,4 +1,4 @@
-"""MiMo TTS 服务封装 — 内置音色 / 声音设计 / 声音克隆"""
+"""TTS 服务封装 — MiMo（OpenAI 兼容）与 Edge TTS（免费旁路）"""
 import os
 import base64
 import uuid
@@ -120,11 +120,25 @@ class TTSService:
         provider_id = runtime_config.tts_provider or "mimo"
         spec = get_provider("tts", provider_id)
         self.provider_id = provider_id
+        self.spec = spec
+        self.supported_model_types = (
+            tuple(spec.supported_model_types) if spec else ("builtin", "design", "clone")
+        )
+
+        # Edge TTS：非 OpenAI 协议，无 Key，单独引擎
+        if provider_id == "edge-tts":
+            self.api_key = ""
+            self.base_url = ""
+            self.client = None
+            self.is_edge = True
+            return
+
+        self.is_edge = False
         self.api_key = runtime_config.api_key
         self.base_url = runtime_config.base_url or (spec.default_base_url if spec else DEFAULT_BASE_URL)
         if not self.api_key:
             label = spec.name if spec else "TTS"
-            raise ValueError(f"需要配置 {label} 的 API Key（设置页可填）")
+            raise ValueError(f"需要配置 {label} 的 API Key（设置页可填，或切换到免费的 Edge TTS）")
         if spec and spec.status != "supported":
             logger.warning(
                 "TTS 供应商 %s 状态为 %s：仅按 OpenAI 兼容协议适配，未完整验证",
@@ -337,6 +351,24 @@ class TTSService:
         context_prev: str | None = None,
     ) -> str:
         """合成语音，返回落盘路径。context_prev 为同主播上一句，用于韵律连贯。"""
+        if model_type not in self.supported_model_types:
+            allowed = " / ".join(self.supported_model_types)
+            raise ValueError(
+                f"当前 TTS 供应商（{self.provider_id}）不支持「{model_type}」模式，仅支持：{allowed}"
+            )
+
+        if self.is_edge:
+            from app.services.edge_tts_engine import synthesize_to_wav
+
+            # Edge 无「导演指令」语义：仅取语速；标签会原样念出，由引擎剥离
+            return await synthesize_to_wav(
+                text,
+                voice_id=voice_id,
+                speed=speed,
+                dest_dir=dest_dir,
+                timeout=TTS_TIMEOUT_SECONDS,
+            )
+
         messages = self._messages_for(
             text, style, speed, emotion, global_instruction, audio_tag_style,
             context_prev=context_prev,

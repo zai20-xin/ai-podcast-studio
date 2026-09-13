@@ -16,9 +16,9 @@
       title="供应商兼容层"
     >
       <p>
-        业务层统一走 OpenAI 兼容接口；鉴权与默认地址由供应商目录决定。
-        <strong>当前完整支持：TTS = MiMo，写稿 LLM = freellmapi / OpenAI</strong>。
-        其他选项仅为协议适配（experimental），内置音色与 MiMo 专有模型名未必可用。
+        <strong>免费开箱：Edge TTS（无需 API Key，仅内置音色）</strong>。
+        完整能力（声音设计 / 克隆）请使用 <strong>MiMo TTS</strong>。
+        写稿 LLM 支持 freellmapi / OpenAI；其他选项为协议适配（experimental）。
       </p>
       <p class="alert-sub">
         开发者扩展新厂商：见 <code>backend/app/providers/catalog.py</code> 与 README「供应商兼容层」。
@@ -28,8 +28,8 @@
     <section class="panel">
       <div class="panel-head">
         <h3>语音合成 · TTS</h3>
-        <el-tag :type="settings.api_key_set ? 'success' : 'danger'" effect="dark" round>
-          {{ settings.api_key_set ? '已配置' : '未配置' }}
+        <el-tag :type="ttsReady ? 'success' : 'danger'" effect="dark" round>
+          {{ ttsReady ? (ttsNeedsKey ? '已配置' : '免费可用') : '未配置' }}
         </el-tag>
       </div>
       <el-form label-position="top">
@@ -47,9 +47,10 @@
               :value="p.id"
             />
           </el-select>
+          <p v-if="activeTts?.description" class="hint">{{ activeTts.description }}</p>
           <p v-if="activeTts?.note" class="hint">{{ activeTts.note }}</p>
         </el-form-item>
-        <el-form-item label="API Key">
+        <el-form-item v-if="ttsNeedsKey" label="API Key">
           <el-input
             v-model="form.api_key"
             :type="showTtsKey ? 'text' : 'password'"
@@ -64,7 +65,7 @@
           </el-input>
           <p v-if="settings.masked_key" class="hint studio-mono">当前 · {{ settings.masked_key }}</p>
         </el-form-item>
-        <el-form-item label="Base URL">
+        <el-form-item v-if="ttsNeedsKey" label="Base URL">
           <el-input
             v-model="form.base_url"
             size="large"
@@ -72,6 +73,14 @@
           />
           <p class="hint">环境变量：<code>MIMO_API_KEY</code> / <code>MIMO_BASE_URL</code>（历史名，语义为当前 TTS 凭证）</p>
         </el-form-item>
+        <el-alert
+          v-else
+          type="success"
+          :closable="false"
+          show-icon
+          class="free-alert"
+          title="当前供应商无需 API Key，可直接试听与合成"
+        />
       </el-form>
     </section>
 
@@ -178,6 +187,9 @@ const ttsProviders = computed(() => settings.value.providers?.tts || [])
 const llmProviders = computed(() => settings.value.providers?.llm || [])
 const activeTts = computed(() => ttsProviders.value.find((p) => p.id === form.tts_provider))
 const activeLlm = computed(() => llmProviders.value.find((p) => p.id === form.llm_provider))
+// catalog 里 requires_key 缺省为 true；edge-tts 等免费通道为 false
+const ttsNeedsKey = computed(() => activeTts.value?.requires_key !== false)
+const ttsReady = computed(() => (ttsNeedsKey.value ? settings.value.api_key_set : true))
 
 const ttsKeyPlaceholder = computed(() =>
   activeTts.value?.id === 'mimo'
@@ -235,8 +247,8 @@ function onLlmProviderChange(id) {
 }
 
 async function saveSettings() {
-  if (!form.api_key.trim() && !settings.value.api_key_set) {
-    ElMessage.warning('请填写 TTS API Key')
+  if (ttsNeedsKey.value && !form.api_key.trim() && !settings.value.api_key_set) {
+    ElMessage.warning('请填写 TTS API Key，或切换到免费的 Edge TTS')
     return
   }
   saving.value = true
@@ -308,6 +320,10 @@ async function testLlm() {
 
 .compat-alert {
   margin-bottom: 16px;
+}
+
+.free-alert {
+  margin-top: 4px;
 }
 
 .compat-alert p {

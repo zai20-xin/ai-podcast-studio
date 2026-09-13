@@ -32,11 +32,20 @@
 
       <el-form-item label="声音来源">
         <el-radio-group v-model="config.model_type" @change="onModelTypeChange">
-          <el-radio-button value="builtin">内置</el-radio-button>
-          <el-radio-button value="design">设计</el-radio-button>
-          <el-radio-button value="clone">克隆</el-radio-button>
+          <el-radio-button
+            v-for="t in allowedModelTypes"
+            :key="t.id"
+            :value="t.id"
+          >
+            {{ t.short || t.name }}
+          </el-radio-button>
         </el-radio-group>
-        <p class="tip">节目场景与演出导向在左侧「演播设定」</p>
+        <p class="tip">
+          <template v-if="!capabilities.design && !capabilities.clone">
+            当前 TTS（{{ ttsProviderLabel }}）仅支持内置音色；设计 / 克隆请在设置中切换到 MiMo
+          </template>
+          <template v-else>节目场景与演出导向在左侧「演播设定」</template>
+        </p>
       </el-form-item>
 
       <el-form-item v-if="config.model_type === 'builtin'" label="选择音色">
@@ -204,7 +213,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { Check, Upload, Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
@@ -236,6 +245,24 @@ const uploadRef = ref(null)
 const styleList = ref([])
 const speedList = ref([])
 const tagList = ref([])
+const defaultVoiceIds = ref({ A: null, B: null })
+const capabilities = ref({ builtin: true, design: true, clone: true })
+const ttsProvider = ref('mimo')
+
+const MODEL_TYPE_LABELS = {
+  builtin: { id: 'builtin', name: '内置音色', short: '内置' },
+  design: { id: 'design', name: '声音设计', short: '设计' },
+  clone: { id: 'clone', name: '克隆音色', short: '克隆' },
+}
+
+const allowedModelTypes = computed(() => {
+  const ids = ['builtin', 'design', 'clone'].filter((id) => capabilities.value[id] !== false)
+  return ids.map((id) => MODEL_TYPE_LABELS[id])
+})
+
+const ttsProviderLabel = computed(() =>
+  ttsProvider.value === 'edge-tts' ? 'Edge TTS' : ttsProvider.value === 'mimo' ? 'MiMo TTS' : ttsProvider.value
+)
 
 // 用户是否手动动过微调项：动了就在折叠区标题上标出来，让状态可见
 const advancedCustomized = ref(false)
@@ -244,22 +271,59 @@ function markAdvancedCustomized() {
   advancedCustomized.value = true
 }
 
-onMounted(async () => {
+onMounted(() => {
+  reloadVoiceContext()
+})
+
+// 演播设定里切换 TTS 引擎后，两个面板都要重拉音色与能力
+watch(
+  () => editorStore.ttsVoiceEpoch,
+  () => {
+    reloadVoiceContext()
+  }
+)
+
+async function reloadVoiceContext() {
   try {
     const [voicesRes, metaRes, clonedRes] = await Promise.all([
       api.get('/api/voices/builtin'),
       api.get('/api/voices/meta'),
       api.get('/api/voices/cloned'),
     ])
-    builtinVoices.value = voicesRes.data.voices
+    builtinVoices.value = voicesRes.data.voices || []
+    defaultVoiceIds.value = voicesRes.data.defaults || { A: null, B: null }
     styleList.value = metaRes.data.styles || []
     speedList.value = metaRes.data.speeds || []
     tagList.value = metaRes.data.audio_tags || []
     clonedVoices.value = clonedRes.data || []
+    capabilities.value = metaRes.data.capabilities || { builtin: true, design: true, clone: true }
+    ttsProvider.value = metaRes.data.tts_provider || 'mimo'
+    coerceHostConfig()
   } catch {
     ElMessage.error('加载音色配置失败')
   }
-})
+}
+
+function coerceHostConfig() {
+  const cfg = props.config
+  if (!cfg) return
+  // 切换 TTS 供应商后，旧 voice_id / design / clone 可能不再可用
+  if (!capabilities.value[cfg.model_type || 'builtin']) {
+    cfg.model_type = 'builtin'
+    cfg.voice_description = ''
+    cfg.reference_audio = null
+  }
+  if (cfg.model_type === 'builtin') {
+    const ids = new Set((builtinVoices.value || []).map((v) => v.id))
+    if (!cfg.voice_id || !ids.has(cfg.voice_id)) {
+      const fallback = defaultVoiceIds.value?.[props.channel === 'B' ? 'B' : 'A']
+        || builtinVoices.value?.[0]?.id
+        || null
+      cfg.voice_id = fallback
+      if (fallback) emit('remember-voice', fallback)
+    }
+  }
+}
 
 // 加载历史版本时同步 UI 选中态
 watch(

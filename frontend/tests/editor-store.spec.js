@@ -19,6 +19,7 @@ vi.mock('../src/api', () => ({
   default: {
     get: vi.fn(),
     post: vi.fn(),
+    put: vi.fn(),
   },
 }))
 
@@ -293,5 +294,72 @@ describe('合成中断与失败上下文', () => {
     await store.parseScript()
     expect(store.scriptOverLimit).toBe(true)
     expect(store.scriptMaxLines).toBe(200)
+  })
+
+  it('switchTtsProvider 写回设置、刷新上下文并纠正主播', async () => {
+    const store = useEditorStore()
+    store.hostA.model_type = 'clone'
+    store.hostA.reference_audio = '/x.wav'
+    store.hostA.voice_id = null
+    store.hostB.model_type = 'builtin'
+    store.hostB.voice_id = '白桦'
+
+    api.get.mockImplementation((url) => {
+      if (url === '/api/settings') {
+        return Promise.resolve({
+          data: {
+            tts_provider: 'edge-tts',
+            api_key_set: false,
+            providers: {
+              tts: [
+                { id: 'edge-tts', name: 'Edge TTS（免费）', requires_key: false, status: 'supported' },
+                { id: 'mimo', name: 'Xiaomi MiMo TTS', requires_key: true, status: 'supported' },
+              ],
+            },
+          },
+        })
+      }
+      if (url === '/api/voices/builtin') {
+        return Promise.resolve({
+          data: {
+            provider: 'edge-tts',
+            voices: [
+              { id: 'zh-CN-XiaoxiaoNeural', name: '晓晓' },
+              { id: 'zh-CN-YunxiNeural', name: '云希' },
+            ],
+            defaults: { A: 'zh-CN-XiaoxiaoNeural', B: 'zh-CN-YunxiNeural' },
+          },
+        })
+      }
+      if (url === '/api/voices/meta') {
+        return Promise.resolve({
+          data: {
+            tts_provider: 'edge-tts',
+            capabilities: { builtin: true, design: false, clone: false },
+          },
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    api.put.mockResolvedValue({ data: { message: 'ok' } })
+
+    const changed = await store.switchTtsProvider('edge-tts')
+    expect(changed).toBe(true)
+    expect(api.put).toHaveBeenCalledWith('/api/settings', { tts_provider: 'edge-tts' })
+    expect(store.ttsProvider).toBe('edge-tts')
+    expect(store.ttsCapabilities.clone).toBe(false)
+    // clone 不可用 → 退回 builtin，并套用默认 Edge 音色
+    expect(store.hostA.model_type).toBe('builtin')
+    expect(store.hostA.voice_id).toBe('zh-CN-XiaoxiaoNeural')
+    expect(store.hostB.voice_id).toBe('zh-CN-YunxiNeural')
+    expect(store.ttsVoiceEpoch).toBe(1)
+  })
+
+  it('switchTtsProvider 同 id 为空操作', async () => {
+    const store = useEditorStore()
+    store.ttsProvider = 'mimo'
+    const changed = await store.switchTtsProvider('mimo')
+    expect(changed).toBe(false)
+    expect(api.put).not.toHaveBeenCalled()
   })
 })

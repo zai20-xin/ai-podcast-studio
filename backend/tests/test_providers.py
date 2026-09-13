@@ -52,6 +52,20 @@ class TestProviderCatalog(unittest.TestCase):
         self.assertTrue(tts["openai_compatible"]["note"])
         self.assertTrue(llm["custom"]["note"])
 
+    def test_edge_tts_free_and_builtin_only(self):
+        from app.providers import TTS_BY_ID, catalog_payload
+
+        edge = TTS_BY_ID["edge-tts"]
+        self.assertFalse(edge.requires_key)
+        self.assertEqual(edge.auth, "none")
+        self.assertEqual(edge.supported_model_types, ("builtin",))
+        self.assertEqual(edge.status, "supported")
+
+        data = catalog_payload()
+        row = next(p for p in data["tts"] if p["id"] == "edge-tts")
+        self.assertFalse(row["requires_key"])
+        self.assertEqual(row["supported_model_types"], ["builtin"])
+
 
 if __name__ == "__main__":
     unittest.main()

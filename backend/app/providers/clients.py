@@ -17,6 +17,9 @@ class _AuthMixin:
     def auth_headers(self) -> dict[str, str]:
         if self._auth_style == "api-key":
             return {"api-key": self.api_key}
+        if self._auth_style == "none":
+            # 仅类型占位；edge-tts 等免费通道不会走 OpenAI SDK
+            return {}
         # OpenAI SDK 默认：Authorization: Bearer <key>
         return {"Authorization": f"Bearer {self.api_key}"}
 

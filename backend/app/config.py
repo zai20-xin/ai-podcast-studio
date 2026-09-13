@@ -24,6 +24,14 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "database").mkdir(parents=True, exist_ok=True)
 
 DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+
+
+def _default_tts_provider() -> str:
+    """未显式指定时：有 MiMo Key 走完整路径，否则落到免费 Edge TTS。"""
+    env = os.environ.get("TTS_PROVIDER", "").strip()
+    if env:
+        return env
+    return "mimo" if os.environ.get("MIMO_API_KEY", "").strip() else "edge-tts"
 TTS_TIMEOUT_SECONDS = 120.0
 # SDK 内建重试关闭：限流与连接错误都由 TTSService 统一退避，避免双层重试放大请求量
 TTS_MAX_RETRIES = 0
@@ -95,7 +103,7 @@ class RuntimeConfig:
     """
 
     def __init__(self) -> None:
-        self._tts_provider = os.environ.get("TTS_PROVIDER", "mimo")
+        self._tts_provider = _default_tts_provider()
         self._api_key = os.environ.get("MIMO_API_KEY", "")
         self._base_url = os.environ.get("MIMO_BASE_URL", DEFAULT_BASE_URL)
         self._llm_provider = os.environ.get("LLM_PROVIDER", "freellmapi")
@@ -105,7 +113,7 @@ class RuntimeConfig:
 
     @property
     def tts_provider(self) -> str:
-        return self._tts_provider or os.environ.get("TTS_PROVIDER", "mimo")
+        return self._tts_provider or _default_tts_provider()
 
     @property
     def api_key(self) -> str:

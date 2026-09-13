@@ -3,10 +3,36 @@
     <div class="dir-head">
       <p class="studio-label">Direction</p>
       <h3>演播设定</h3>
-      <p class="dir-sub">① 先选场景定基调 → ② 再在下方选主播音色</p>
+      <p class="dir-sub">① 选 TTS 引擎与场景 → ② 再在下方选主播音色</p>
     </div>
 
     <div class="dir-grid">
+      <div class="dir-field">
+        <p class="field-label">
+          TTS 引擎
+          <span class="field-tag" :class="{ free: !activeTts?.requires_key }">
+            {{ activeTts?.requires_key === false ? '免 Key' : '需 Key' }}
+          </span>
+        </p>
+        <el-select
+          v-model="selectedProvider"
+          class="w-full"
+          :loading="switching"
+          placeholder="选择语音合成引擎"
+          @change="onProviderChange"
+        >
+          <el-option
+            v-for="p in store.ttsProviders"
+            :key="p.id"
+            :label="providerLabel(p)"
+            :value="p.id"
+          />
+        </el-select>
+        <p v-if="activeTts?.description" class="field-hint">{{ activeTts.description }}</p>
+        <p v-if="capabilityLine" class="field-hint">{{ capabilityLine }}</p>
+        <p v-if="switchHint" class="field-hint warn">{{ switchHint }}</p>
+      </div>
+
       <div class="dir-field">
         <p class="field-label">节目场景</p>
         <el-select
@@ -49,6 +75,9 @@
         <p class="field-hint">
           描述「怎么演」：角色、场景、语气。语速请用场景或右侧「微调语气」，不要写在这里。
           设计模式下会压成一句「说话方式」附在音色描述后，避免改声线。
+          <template v-if="!store.ttsCapabilities.design && !store.ttsCapabilities.clone">
+            当前引擎仅支持内置音色，「设计 / 克隆」不可用。
+          </template>
         </p>
       </div>
     </div>
@@ -56,8 +85,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
+import { useEditorStore } from '../stores/editor'
 
 const props = defineProps({
   globalInstruction: { type: String, default: '' },
@@ -70,12 +101,38 @@ const props = defineProps({
 
 const emit = defineEmits(['update:globalInstruction'])
 
+const store = useEditorStore()
 const scenePresets = ref({})
 const selectedScene = ref(null)
+const selectedProvider = ref('mimo')
+const switching = ref(false)
 
 const activePreset = computed(() =>
   selectedScene.value ? scenePresets.value[selectedScene.value] : null
 )
+
+const activeTts = computed(() =>
+  store.ttsProviders.find((p) => p.id === selectedProvider.value) ||
+  store.ttsProviders.find((p) => p.id === store.ttsProvider) ||
+  null
+)
+
+const capabilityLine = computed(() => {
+  const caps = store.ttsCapabilities || {}
+  const parts = []
+  if (caps.builtin !== false) parts.push('内置音色')
+  if (caps.design) parts.push('声音设计')
+  if (caps.clone) parts.push('克隆')
+  return parts.length ? `可用能力：${parts.join(' · ')}` : ''
+})
+
+const switchHint = computed(() => {
+  if (activeTts.value?.requires_key === false) return null
+  if (!store.ttsApiKeySet) {
+    return '尚未配置该引擎的 API Key，请到「设置」填写，或先用 Edge TTS。'
+  }
+  return null
+})
 
 const modeMismatch = computed(() => {
   const name = selectedScene.value || ''
@@ -89,7 +146,28 @@ const modeMismatch = computed(() => {
   return null
 })
 
+function providerLabel(p) {
+  const free = p.requires_key === false ? ' · 免费' : ''
+  const exp = p.status === 'supported' ? '' : ' · 实验性'
+  return `${p.name}${free}${exp}`
+}
+
+watch(
+  () => store.ttsProvider,
+  (id) => {
+    if (id && id !== selectedProvider.value) selectedProvider.value = id
+  },
+  { immediate: true }
+)
+
 onMounted(async () => {
+  try {
+    // 总是拉一次：设置页可能刚改过供应商，避免演播面板状态漂移
+    await store.loadTtsContext()
+    selectedProvider.value = store.ttsProvider
+  } catch {
+    /* 设置加载失败不阻塞编辑；可在系统设置页重试 */
+  }
   try {
     const res = await api.get('/api/voices/presets')
     scenePresets.value = res.data.presets || {}
@@ -97,6 +175,43 @@ onMounted(async () => {
     /* 预设加载失败不阻塞编辑 */
   }
 })
+
+async function onProviderChange(id) {
+  if (!id || id === store.ttsProvider) return
+  const next = store.ttsProviders.find((p) => p.id === id)
+  const needsKey = next?.requires_key !== false
+  if (needsKey && !store.ttsApiKeySet) {
+    ElMessage.warning('该引擎需要 API Key，请先在「设置」中配置')
+    selectedProvider.value = store.ttsProvider
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '切换 TTS 引擎后，主播音色会自动对齐到新引擎；已合成的分句将因指纹变化全部重做。',
+      '切换 TTS 引擎',
+      {
+        type: 'warning',
+        confirmButtonText: '切换',
+        cancelButtonText: '取消',
+      }
+    )
+  } catch {
+    selectedProvider.value = store.ttsProvider
+    return
+  }
+
+  switching.value = true
+  try {
+    await store.switchTtsProvider(id)
+    ElMessage.success(`已切换到 ${next?.name || id}`)
+  } catch (e) {
+    selectedProvider.value = store.ttsProvider
+    ElMessage.error(e.response?.data?.detail || e.message || '切换失败')
+  } finally {
+    switching.value = false
+  }
+}
 
 function applySpeed(host, speed) {
   if (!host) return
@@ -117,7 +232,11 @@ function onSceneChange(name) {
 
   // 推荐音色：只在 A 仍是内置音色时套用，避免覆盖用户选好的克隆/设计
   if (props.hostA && props.hostA.model_type === 'builtin' && preset.voice_id) {
-    props.hostA.voice_id = preset.voice_id
+    // Edge 等引擎音色表与 MiMo 不同，不在当前列表时不套用
+    const ids = new Set((store.ttsBuiltinVoices || []).map((v) => v.id))
+    if (!ids.size || ids.has(preset.voice_id)) {
+      props.hostA.voice_id = preset.voice_id
+    }
   }
 }
 </script>
@@ -170,6 +289,11 @@ function onSceneChange(name) {
   border: 1px solid var(--studio-line);
   border-radius: 999px;
   padding: 0 8px;
+}
+
+.field-tag.free {
+  color: var(--el-color-success, #67c23a);
+  border-color: var(--el-color-success, #67c23a);
 }
 
 .field-hint {

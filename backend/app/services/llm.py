@@ -155,6 +155,9 @@ def friendly_error(exc: Exception | str) -> str:
     """把工程错误翻译成用户能懂的话"""
     msg = str(exc)
     low = msg.lower()
+    # Edge 引擎已写好可操作的中文说明，不要被下面的通用分支盖掉
+    if msg.startswith("Edge TTS"):
+        return msg
     if "api key" in low or "unauthorized" in low or "401" in low:
         return "API Key 无效或未配置，请到「设置」检查"
     if "timeout" in low or "timed out" in low:
@@ -175,8 +178,11 @@ def friendly_error(exc: Exception | str) -> str:
         return "参考音频有问题：请换 10–15 秒干净人声（wav/mp3，≤7.5MB）"
     if "脚本为空" in msg or "无法解析" in msg:
         return "脚本无法解析出有效台词，请检查「角色：台词」格式"
-    if "未返回音频" in msg:
-        return "语音服务没有返回音频，请稍后重试或换一句"
+    if "未返回音频" in msg or "No audio was received" in msg:
+        return (
+            "语音服务没有返回音频（多为免费 Edge 通道限流）。"
+            "请稍后重试；若频繁出现，请在演播设定切换到 MiMo TTS"
+        )
     if "connection" in low or "connect" in low:
         return "无法连接服务，请确认本地 API 或网络是否可用"
     return msg[:200]

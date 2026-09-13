@@ -2,9 +2,16 @@
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+from dotenv import load_dotenv
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = BACKEND_DIR.parent
 DATA_DIR = BASE_DIR / "data"
 DATABASE_URL = f"sqlite:///{DATA_DIR / 'database' / 'app.db'}"
+# 设置页写入的持久化文件（已 gitignore）；uvicorn -m 启动时也要能读到
+ENV_PATH = BACKEND_DIR / ".env"
+
+load_dotenv(ENV_PATH)
 
 AUDIO_DIR = DATA_DIR / "audio"
 VOICES_DIR = DATA_DIR / "voices"
@@ -117,21 +124,61 @@ class RuntimeConfig:
         llm_base_url: str | None = None,
         llm_model: str | None = None,
     ) -> None:
+        """热更新内存配置，并写回 backend/.env，避免进程重启后丢失。"""
+        applied: dict[str, str] = {}
         if api_key:
             self._api_key = api_key
             os.environ["MIMO_API_KEY"] = api_key
+            applied["MIMO_API_KEY"] = api_key
         if base_url:
             self._base_url = base_url
             os.environ["MIMO_BASE_URL"] = base_url
+            applied["MIMO_BASE_URL"] = base_url
         if llm_api_key:
             self._llm_api_key = llm_api_key
             os.environ["LLM_API_KEY"] = llm_api_key
+            applied["LLM_API_KEY"] = llm_api_key
         if llm_base_url:
             self._llm_base_url = llm_base_url
             os.environ["LLM_BASE_URL"] = llm_base_url
+            applied["LLM_BASE_URL"] = llm_base_url
         if llm_model:
             self._llm_model = llm_model
             os.environ["LLM_MODEL"] = llm_model
+            applied["LLM_MODEL"] = llm_model
+        if applied:
+            persist_env(applied)
+
+
+def persist_env(updates: dict[str, str]) -> None:
+    """合并写入 backend/.env（保留注释与未涉及的键）。"""
+    lines: list[str] = []
+    if ENV_PATH.exists():
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            out.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+
+    for key, value in updates.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+
+    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+    try:
+        ENV_PATH.chmod(0o600)
+    except OSError:
+        pass
 
 
 runtime_config = RuntimeConfig()

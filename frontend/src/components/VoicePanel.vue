@@ -5,26 +5,6 @@
     </div>
 
     <el-form label-position="top" size="default">
-      <el-form-item label="快速场景">
-        <el-select
-          v-model="selectedPreset"
-          style="width: 100%"
-          placeholder="选择场景预设"
-          clearable
-          @change="applyPreset"
-        >
-          <el-option
-            v-for="(preset, name) in scenePresets"
-            :key="name"
-            :label="name"
-            :value="name"
-          >
-            <span>{{ name }}</span>
-            <span class="opt-desc">{{ preset.description }}</span>
-          </el-option>
-        </el-select>
-      </el-form-item>
-
       <el-form-item v-if="showSpeakerMapping" label="负责的角色">
         <el-select
           v-model="config.speaker_names"
@@ -56,6 +36,7 @@
           <el-radio-button value="design">设计</el-radio-button>
           <el-radio-button value="clone">克隆</el-radio-button>
         </el-radio-group>
+        <p class="tip">节目场景与演出导向在左侧「演播设定」</p>
       </el-form-item>
 
       <el-form-item v-if="config.model_type === 'builtin'" label="选择音色">
@@ -81,9 +62,9 @@
           :rows="3"
           maxlength="300"
           show-word-limit
-          placeholder="例如：二十多岁女性，声音温暖柔和，像深夜电台主播"
+          placeholder="例：25–35岁女性，中高音清亮略带气声，温婉知性，像安静聊天"
         />
-        <p class="tip">用文字描述生成声音，无需参考音频；切换来源时会清空</p>
+        <p class="tip">描述音色本身（年龄/音区/质感/气质）。语速与风格请用下方「微调」</p>
       </el-form-item>
 
       <template v-if="config.model_type === 'clone'">
@@ -93,13 +74,14 @@
               v-model="selectedClonedVoiceId"
               style="flex: 1"
               clearable
+              filterable
               placeholder="选择已上传的克隆音色"
               @change="onSelectClonedVoice"
             >
               <el-option
                 v-for="v in clonedVoices"
                 :key="v.id"
-                :label="`${v.name} (#${v.id})`"
+                :label="v.name"
                 :value="v.id"
               />
             </el-select>
@@ -107,19 +89,32 @@
               size="default"
               :disabled="!selectedClonedVoiceId"
               :loading="clonePreviewLoading"
+              title="试听"
               @click="playClonedRef"
             >
               试听
             </el-button>
             <el-button
               size="default"
+              :disabled="!selectedClonedVoiceId"
+              title="重命名"
+              @click="renameClonedVoice"
+            >
+              重命名
+            </el-button>
+            <el-button
+              size="default"
               type="danger"
               plain
               :disabled="!selectedClonedVoiceId"
+              title="删除"
               @click="removeClonedVoice"
             >
               删除
             </el-button>
+          </div>
+          <div v-if="clonedVoices.length" class="clone-manage-hint">
+            共 {{ clonedVoices.length }} 条素材 · 可重命名或删除
           </div>
           <audio v-if="clonePreviewUrl" ref="cloneAudio" :src="clonePreviewUrl" class="try-audio" controls />
         </el-form-item>
@@ -148,7 +143,7 @@
             <div v-else class="upload-placeholder">
               <el-icon><Upload /></el-icon>
               <span>拖入或点击上传</span>
-              <span class="tip">10–15 秒干净人声 · wav/mp3 · ≤7.5MB</span>
+              <span class="tip">10–15 秒干净人声 · wav/mp3 · ≤7.5MB · 上传时可命名</span>
             </div>
           </el-upload>
         </el-form-item>
@@ -157,26 +152,29 @@
       <el-collapse class="advanced-block">
         <el-collapse-item name="advanced">
           <template #title>
-            <span class="adv-title">高级设置</span>
+            <span class="adv-title">微调语气</span>
             <el-tag v-if="advancedCustomized" size="small" type="warning" effect="plain" round class="adv-tag">
               已自定义
             </el-tag>
-            <span v-else class="adv-hint">已按场景自动设定，通常无需修改</span>
+            <span v-else class="adv-hint">通常跟场景走即可，不用改</span>
           </template>
           <div class="row-2">
-            <el-form-item label="风格">
-              <el-select v-model="config.style" style="width: 100%" clearable placeholder="默认风格" @change="markAdvancedCustomized">
-                <el-option v-for="name in styleList" :key="name" :label="name" :value="name" />
-              </el-select>
-            </el-form-item>
             <el-form-item label="语速">
               <el-select v-model="config.speed" style="width: 100%" clearable placeholder="默认语速" @change="markAdvancedCustomized">
                 <el-option v-for="name in speedList" :key="name" :label="name" :value="name" />
               </el-select>
             </el-form-item>
+            <el-form-item label="风格">
+              <el-select v-model="config.style" style="width: 100%" clearable placeholder="默认风格" @change="markAdvancedCustomized">
+                <el-option v-for="name in styleList" :key="name" :label="name" :value="name" />
+              </el-select>
+            </el-form-item>
           </div>
 
           <div class="row-2">
+            <el-form-item label="情绪">
+              <el-input v-model="config.emotion" placeholder="开心 / 沉稳" clearable @change="markAdvancedCustomized" />
+            </el-form-item>
             <el-form-item label="句首标签">
               <el-select
                 v-model="config.audio_tag_style"
@@ -187,9 +185,6 @@
               >
                 <el-option v-for="name in tagList" :key="name" :label="name" :value="name" />
               </el-select>
-            </el-form-item>
-            <el-form-item label="情绪">
-              <el-input v-model="config.emotion" placeholder="开心 / 沉稳" clearable @change="markAdvancedCustomized" />
             </el-form-item>
           </div>
         </el-collapse-item>
@@ -227,19 +222,14 @@ const props = defineProps({
   label: String,
   channel: { type: String, default: 'A' },
   config: Object,
-  globalInstruction: String,
   availableSpeakers: { type: Array, default: () => [] },
   showSpeakerMapping: { type: Boolean, default: false },
-  /** 仅 A 通道在全局指令为空时写入预设指令，避免双通道互相覆盖 */
-  canWriteGlobal: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['update:globalInstruction'])
+const emit = defineEmits(['remember-voice', 'restore-builtin-voice'])
 
 const builtinVoices = ref([])
 const clonedVoices = ref([])
-const scenePresets = ref({})
-const selectedPreset = ref(null)
 const selectedClonedVoiceId = ref(null)
 const uploading = ref(false)
 const uploadRef = ref(null)
@@ -247,7 +237,7 @@ const styleList = ref([])
 const speedList = ref([])
 const tagList = ref([])
 
-// 用户是否手动动过高级项：动了就在折叠区标题上标出来，让状态可见
+// 用户是否手动动过微调项：动了就在折叠区标题上标出来，让状态可见
 const advancedCustomized = ref(false)
 
 function markAdvancedCustomized() {
@@ -256,14 +246,12 @@ function markAdvancedCustomized() {
 
 onMounted(async () => {
   try {
-    const [voicesRes, presetsRes, metaRes, clonedRes] = await Promise.all([
+    const [voicesRes, metaRes, clonedRes] = await Promise.all([
       api.get('/api/voices/builtin'),
-      api.get('/api/voices/presets'),
       api.get('/api/voices/meta'),
       api.get('/api/voices/cloned'),
     ])
     builtinVoices.value = voicesRes.data.voices
-    scenePresets.value = presetsRes.data.presets
     styleList.value = metaRes.data.styles || []
     speedList.value = metaRes.data.speeds || []
     tagList.value = metaRes.data.audio_tags || []
@@ -284,10 +272,6 @@ watch(
     } else {
       selectedClonedVoiceId.value = null
     }
-    // 手动改过配置后，清掉场景预设高亮，避免“看似仍套着预设”
-    if (cfg.model_type !== 'builtin' && selectedPreset.value) {
-      selectedPreset.value = null
-    }
   },
   { deep: true }
 )
@@ -305,43 +289,12 @@ async function tryCurrentVoice() {
   }
 }
 
-function applyPreset(presetName) {
-  if (!presetName) return
-  const preset = scenePresets.value[presetName]
-  if (!preset) return
-
-  // 预设走内置音色；通过 switch 清掉 design/clone 残留
-  if (props.config.model_type !== 'builtin') {
-    props.config.model_type = 'builtin'
-    props.config.reference_audio = null
-    props.config.voice_description = ''
-    selectedClonedVoiceId.value = null
-  }
-  props.config.voice_id = preset.voice_id
-  props.config.style = preset.style || null
-  props.config.speed = preset.speed || null
-  props.config.emotion = preset.emotion || ''
-  // 预设不改句首标签，避免静默覆盖用户细调
-  // 重新套用预设后，高级项回到「自动设定」状态
-  advancedCustomized.value = false
-  if (preset.voice_id) {
-    // 记住该通道音色
-    emit('remember-voice', preset.voice_id)
-  }
-
-  // 仅在全局指令为空时写入，防止双通道预设互相覆盖
-  if (props.canWriteGlobal && !(props.globalInstruction || '').trim()) {
-    emit('update:globalInstruction', preset.global_instruction || '')
-  }
-}
-
 function onModelTypeChange(nextType) {
   const next = nextType || props.config.model_type
   props.config.model_type = next
   props.config.reference_audio = null
   props.config.voice_description = ''
   selectedClonedVoiceId.value = null
-  selectedPreset.value = null
 
   if (next === 'builtin') {
     // 由父级/最近音色决定，不在这里写死「冰糖」
@@ -353,7 +306,6 @@ function onModelTypeChange(nextType) {
 }
 
 function onBuiltinVoiceChange(voiceId) {
-  selectedPreset.value = null
   if (voiceId) emit('remember-voice', voiceId)
 }
 
@@ -377,12 +329,17 @@ async function playClonedRef() {
 
 async function removeClonedVoice() {
   if (!selectedClonedVoiceId.value) return
+  const current = clonedVoices.value.find((v) => v.id === selectedClonedVoiceId.value)
   try {
-    await ElMessageBox.confirm('删除该克隆音色及其参考音频？', '删除克隆音色', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
+    await ElMessageBox.confirm(
+      `删除「${current?.name || '该素材'}」及其参考音频文件？此操作不可恢复。`,
+      '删除克隆素材',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      }
+    )
   } catch {
     return
   }
@@ -394,10 +351,41 @@ async function removeClonedVoice() {
     return
   }
   clonedVoices.value = clonedVoices.value.filter((v) => v.id !== id)
-  props.config.reference_audio = null
+  // 若当前通道正引用被删素材，清掉引用，避免合成时指向空路径
+  if (props.config.reference_audio && current?.reference_path === props.config.reference_audio) {
+    props.config.reference_audio = null
+  }
   selectedClonedVoiceId.value = null
   clonePreviewUrl.value = ''
   ElMessage.success('已删除')
+}
+
+async function renameClonedVoice() {
+  if (!selectedClonedVoiceId.value) return
+  const current = clonedVoices.value.find((v) => v.id === selectedClonedVoiceId.value)
+  if (!current) return
+  let name
+  try {
+    const { value } = await ElMessageBox.prompt('输入新的素材名称', '重命名克隆素材', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputValue: current.name,
+      inputPattern: /^[\s\S]{1,64}$/,
+      inputErrorMessage: '长度 1–64 个字符',
+    })
+    name = value.trim()
+  } catch {
+    return
+  }
+  if (!name || name === current.name) return
+  try {
+    const res = await api.patch(`/api/voices/cloned/${current.id}`, { name })
+    const idx = clonedVoices.value.findIndex((v) => v.id === current.id)
+    if (idx >= 0) clonedVoices.value[idx] = res.data
+    ElMessage.success('已重命名')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '重命名失败')
+  }
 }
 
 function onSelectClonedVoice(id) {
@@ -419,7 +407,8 @@ async function onAudioUpload(file) {
   if (!file || !file.raw) return
   if (file.status && file.status !== 'ready') return
 
-  const suffix = (file.name || file.raw.name || '').toLowerCase().split('.').pop()
+  const rawName = file.name || file.raw.name || ''
+  const suffix = rawName.toLowerCase().split('.').pop()
   if (!['wav', 'mp3'].includes(suffix)) {
     ElMessage.error('仅支持 wav / mp3')
     return
@@ -429,18 +418,43 @@ async function onAudioUpload(file) {
     ElMessage.error('参考音频不能超过 7.5MB（MiMo Base64 限制）')
     return
   }
+
+  const defaultName = rawName.replace(/\.[^.]+$/, '').slice(0, 64) || '克隆音色'
+  let displayName
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '给这条克隆素材起个名字，方便以后选用',
+      '命名克隆素材',
+      {
+        confirmButtonText: '上传',
+        cancelButtonText: '取消',
+        inputValue: defaultName,
+        inputPattern: /^[\s\S]{1,64}$/,
+        inputErrorMessage: '长度 1–64 个字符',
+      }
+    )
+    displayName = value.trim()
+  } catch {
+    return
+  }
+  if (!displayName) {
+    ElMessage.warning('名称不能为空')
+    return
+  }
+
   uploading.value = true
   try {
     const formData = new FormData()
     formData.append('audio', file.raw)
-    const name = `clone_${Date.now()}`
-    const res = await api.post(`/api/voices/clone?name=${encodeURIComponent(name)}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
+    const res = await api.post(
+      `/api/voices/clone?name=${encodeURIComponent(displayName)}`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    )
     props.config.reference_audio = res.data.reference_path
     selectedClonedVoiceId.value = res.data.id
     clonedVoices.value = [res.data, ...clonedVoices.value]
-    ElMessage.success('参考音频已上传')
+    ElMessage.success(`已保存「${res.data.name}」`)
   } catch (error) {
     ElMessage.error('上传失败: ' + (error.response?.data?.detail || error.message))
     props.config.reference_audio = null
@@ -473,12 +487,6 @@ async function onAudioUpload(file) {
   border-radius: 999px;
   background: var(--studio-blue-dim);
   border: 1px solid rgba(106, 168, 232, 0.35);
-}
-
-.opt-desc {
-  color: var(--studio-muted);
-  font-size: 12px;
-  margin-left: 8px;
 }
 
 .tip {
@@ -533,6 +541,14 @@ async function onAudioUpload(file) {
   gap: 8px;
   width: 100%;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.clone-manage-hint {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--studio-muted, #999);
 }
 
 /* 高级设置折叠区：视觉上融入表单，默认收起 */

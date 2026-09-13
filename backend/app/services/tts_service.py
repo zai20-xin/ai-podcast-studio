@@ -181,18 +181,29 @@ class TTSService:
     ) -> str:
         """组装发给 TTS 的「导演指令」。
 
-        维度职责分离，避免同一维度被多个来源重复描述（旧实现会把三处对语速的
-        不同要求一起发出去，互相矛盾）：
-          - global_instruction：情境描述（角色 / 场景 / 怎么演），由场景预设提供
-          - style：语气修正
-          - emotion：情绪修正
+        MiMo TTS 的约定（实测）：
+        - 只用 user（指令）+ assistant（待读文本），**不支持 system**
+        - 指令过长会稀释重点，且会拉长语速；应短而完整
+        - 维度职责分离：global 只写「怎么演」，语速只出现一次
+
+        维度职责分离，避免同一维度被多个来源重复描述：
+          - global_instruction：情境描述（角色 / 场景 / 怎么演）
           - speed：语速的唯一来源
+          - style / emotion：可选微调，默认留空
         """
         parts: list[str] = []
 
-        direction = (global_instruction or "").strip().rstrip("。，,.")
+        direction = (global_instruction or "").strip()
+        # 实测长指令会显著拉长成片；截到约 300 字仍保留角色/场景核心
+        if len(direction) > 300:
+            direction = direction[:300].rstrip() + "…"
+        direction = direction.rstrip("。，,.")
         if direction:
             parts.append(direction)
+
+        # 语速全流程只在这里出现一次；放在情境之后，作为对「节奏」的明确覆盖
+        if speed:
+            parts.append(SPEED_PRESETS.get(speed) or f"语速{speed}")
 
         if style:
             parts.append(STYLE_PRESETS.get(style) or style)
@@ -201,10 +212,6 @@ class TTSService:
             emotion_text = str(emotion).strip()
             if emotion_text:
                 parts.append(f"整体情绪偏{emotion_text}")
-
-        # 语速全流程只在这里出现一次
-        if speed:
-            parts.append(SPEED_PRESETS.get(speed) or f"语速{speed}")
 
         return "。".join(parts)
 
@@ -233,12 +240,22 @@ class TTSService:
         emotion: str | None,
         global_instruction: str | None,
         audio_tag_style: str | None,
+        context_prev: str | None = None,
     ) -> list[dict]:
+        """构造 chat messages。
+
+        context_prev：同一主播上一句已合成文本。实测把上一句放进多轮
+        history 会改变韵律（成片更连贯、更像在「接着说」），因此播客正文
+        应按脚本顺序串行，并带上上一句。
+        """
         instruction = self._build_instruction(style, speed, emotion, global_instruction)
         speak_text = self._build_audio_tag_text(text, audio_tag_style)
-        messages = []
+        messages: list[dict] = []
         if instruction:
             messages.append({"role": "user", "content": instruction})
+        if context_prev:
+            messages.append({"role": "assistant", "content": context_prev})
+            messages.append({"role": "user", "content": "继续说，语气和节奏保持连贯"})
         messages.append({"role": "assistant", "content": speak_text})
         return messages
 
@@ -310,10 +327,12 @@ class TTSService:
         global_instruction: str | None = None,
         audio_tag_style: str | None = None,
         dest_dir: Path | None = None,
+        context_prev: str | None = None,
     ) -> str:
-        """合成语音，返回落盘路径"""
+        """合成语音，返回落盘路径。context_prev 为同主播上一句，用于韵律连贯。"""
         messages = self._messages_for(
-            text, style, speed, emotion, global_instruction, audio_tag_style
+            text, style, speed, emotion, global_instruction, audio_tag_style,
+            context_prev=context_prev,
         )
 
         if model_type == "clone":
@@ -329,19 +348,28 @@ class TTSService:
         elif model_type == "design":
             if not voice_description:
                 raise ValueError("声音设计需要提供声音描述")
-            extra = self._build_instruction(style, speed, emotion, None)
-            full_description = voice_description
-            if extra:
-                full_description = f"{voice_description}。{extra}"
-            # design 的描述放在 user，text 仍走 assistant
-            design_messages = [
+            # design 的 user 必须以「音色」为主维度。
+            # 整段「角色/场景」导向若原样塞进去，模型容易当成音色设定去改声线，
+            # 与用户写的描述抢戏。这里只保留短节奏/语气，并把导向压成一句「怎么说话」。
+            perf = self._build_instruction(style, speed, emotion, None)
+            scene_hint = (global_instruction or "").strip().rstrip("。，,.")
+            if len(scene_hint) > 80:
+                scene_hint = scene_hint[:80].rstrip() + "…"
+            voice_line = (voice_description or "").strip()
+            parts = [voice_line]
+            if scene_hint:
+                parts.append(f"说话方式：{scene_hint}")
+            if perf:
+                parts.append(perf)
+            full_description = "。".join(p for p in parts if p)[:500]
+            design_messages: list[dict] = [
                 {"role": "user", "content": full_description},
-                {"role": "assistant", "content": self._build_audio_tag_text(text, audio_tag_style)},
             ]
-            if global_instruction:
-                design_messages.insert(
-                    0, {"role": "user", "content": global_instruction}
-                )
+            speak_text = self._build_audio_tag_text(text, audio_tag_style)
+            if context_prev:
+                design_messages.append({"role": "assistant", "content": context_prev})
+                design_messages.append({"role": "user", "content": "继续说，语气和节奏保持连贯"})
+            design_messages.append({"role": "assistant", "content": speak_text})
             completion = await self._create_completion(
                 MODEL_IDS["design"],
                 design_messages,

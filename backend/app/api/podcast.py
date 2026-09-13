@@ -401,10 +401,24 @@ async def _run_synthesis(episode_id: int) -> None:
         pending = [s for s in segments if s["status"] != "done"]
 
         if pending:
+            # 按脚本顺序串行，并带上同主播上一句 —— 多轮 history 实测会改变韵律，
+            # 并发乱序会丢掉「接着说」的连贯感（这是成片发平的主要来源之一）。
+            consecutive_failures = 0
+            # 已完成分句也作为起点：续跑时上一句可能是上次合成的
+            prev_text: dict[str, str] = {}
+            for s in sorted(segments, key=lambda x: x["index"]):
+                if s["status"] == "done" and s.get("text"):
+                    key = s.get("speaker") or ""
+                    prev_text[key] = s["text"]
 
-            async def _synth_one(seg: dict) -> tuple[dict, str | None, str | None]:
-                """合成单句。异常在内部收拢成 (seg, None, error)，便于并发收结果。"""
+            for seg in sorted(pending, key=lambda x: x["index"]):
+                if task_runner.is_cancelled(episode_id):
+                    logger.info("单集 %s 收到取消信号，停止后续分句", episode_id)
+                    raise asyncio.CancelledError()
+
                 config = seg_hosts[seg["index"]]
+                speaker_key = seg.get("speaker") or ""
+                ctx = prev_text.get(speaker_key)
                 try:
                     produced = await tts.synthesize(
                         text=seg["text"],
@@ -418,51 +432,34 @@ async def _run_synthesis(episode_id: int) -> None:
                         global_instruction=episode.global_instruction,
                         audio_tag_style=config.audio_tag_style,
                         dest_dir=seg_dir,
+                        context_prev=ctx,
                     )
                     target = seg_dir / f"{seg['index']:03d}.wav"
                     if Path(produced) != target:
                         Path(produced).replace(target)
-                    return seg, str(target), None
+                    seg["audio_path"] = str(target)
+                    seg["status"] = "done"
+                    seg["error"] = None
+                    prev_text[speaker_key] = seg["text"]
+                    consecutive_failures = 0
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    return seg, None, friendly_error(e)
+                    err = friendly_error(e)
+                    logger.warning("分句 %s 失败: %s", seg["index"], err)
+                    seg["status"] = "error"
+                    seg["error"] = err
+                    consecutive_failures += 1
 
-            # 并发下发所有待合成句；实际同时在飞的数量由 TTSService 的闸门约束
-            tasks = [asyncio.create_task(_synth_one(s)) for s in pending]
-            consecutive_failures = 0
-            try:
-                for finished in asyncio.as_completed(tasks):
-                    if task_runner.is_cancelled(episode_id):
-                        logger.info("单集 %s 收到取消信号，停止后续分句", episode_id)
-                        raise asyncio.CancelledError()
-                    seg, path, err = await finished
-                    if err:
-                        logger.warning("分句 %s 失败: %s", seg["index"], err)
-                        seg["status"] = "error"
-                        seg["error"] = err
-                        consecutive_failures += 1
-                    else:
-                        seg["audio_path"] = path
-                        seg["status"] = "done"
-                        seg["error"] = None
-                        consecutive_failures = 0
-                    # 进度与落库统一在主协程串行处理，避免多个协程并发写同一个 session
-                    _update_progress()
-                    _persist()
-                    if consecutive_failures >= FAIL_FAST_THRESHOLD:
-                        logger.warning(
-                            "单集 %s 连续 %d 句失败，判定为系统性问题，中止剩余分句",
-                            episode_id,
-                            consecutive_failures,
-                        )
-                        break
-            finally:
-                # 中止或取消时回收尚未完成的请求
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                _update_progress()
+                _persist()
+                if consecutive_failures >= FAIL_FAST_THRESHOLD:
+                    logger.warning(
+                        "单集 %s 连续 %d 句失败，判定为系统性问题，中止剩余分句",
+                        episode_id,
+                        consecutive_failures,
+                    )
+                    break
 
         # 有失败分句则如实上报；已成功的句子保留，可直接续跑
         failed = [s for s in segments if s["status"] == "error"]

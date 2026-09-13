@@ -41,6 +41,18 @@
     "GET /api/voices/presets": {
       "required_keys": ["presets"]
     },
+    "GET /api/voices/cloned": {
+      "item_keys": ["id", "name", "reference_path", "created_at"]
+    },
+    "POST /api/voices/clone": {
+      "required_keys": ["id", "name", "reference_path", "created_at"]
+    },
+    "PATCH /api/voices/cloned/{id}": {
+      "required_keys": ["id", "name", "reference_path", "created_at"]
+    },
+    "DELETE /api/voices/cloned/{id}": {
+      "required_keys": ["message", "id"]
+    },
     "POST /api/projects": {
       "required_keys": [
         "id",

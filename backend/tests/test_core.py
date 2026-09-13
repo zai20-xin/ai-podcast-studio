@@ -121,6 +121,68 @@ class TestTTSInstruction(unittest.TestCase):
         self.assertIn("(轻笑)你好", tagged)
         self.assertEqual(convert_tags("[sigh]唉"), "(叹气)唉")
 
+    def test_instruction_caps_long_direction(self):
+        """过长的演出导向会稀释重点并拉长成片，应截断。"""
+        from app.services.tts_service import TTSService
+
+        svc = TTSService()
+        long_dir = "你是主播" + "讲解这个话题" * 80
+        text = svc._build_instruction(global_instruction=long_dir, speed="正常")
+        self.assertLess(len(text), 400)
+        self.assertIn("…", text)
+
+    def test_messages_carry_context_prev(self):
+        from app.services.tts_service import TTSService
+
+        svc = TTSService()
+        msgs = svc._messages_for(
+            "第二句",
+            None,
+            "正常",
+            None,
+            "自然聊天",
+            None,
+            context_prev="第一句",
+        )
+        roles = [m["role"] for m in msgs]
+        self.assertEqual(roles, ["user", "assistant", "user", "assistant"])
+        self.assertEqual(msgs[1]["content"], "第一句")
+        self.assertEqual(msgs[-1]["content"], "第二句")
+
+    def test_design_keeps_voice_line_primary(self):
+        """设计模式：音色描述为主，场景导向只压成短「说话方式」，不整段塞入。"""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.tts_service import TTSService
+
+        svc = TTSService()
+        long_scene = "你是一档单人播客的主播" + "正在和听众聊天" * 30
+
+        async def main():
+            with patch.object(svc, "_create_completion", new_callable=AsyncMock) as mock:
+                mock.return_value = type("R", (), {})()
+                mock.return_value.choices = [
+                    type("C", (), {"message": type("M", (), {"audio": type("A", (), {"data": "AAAA"})()})()})()
+                ]
+                with patch.object(svc, "_save_audio", return_value="/tmp/x.wav"):
+                    await svc.synthesize(
+                        text="你好",
+                        model_type="design",
+                        voice_description="25岁女性清亮女声",
+                        global_instruction=long_scene,
+                        speed="正常",
+                    )
+                messages = mock.await_args.args[1]
+                user = messages[0]["content"]
+                self.assertTrue(user.startswith("25岁女性清亮女声"))
+                self.assertIn("说话方式：", user)
+                self.assertLess(len(user), 500)
+                # 整段场景不应原样进入 user（会被压成 ≤80 字的说话方式）
+                self.assertNotIn(long_scene[:120], user)
+                self.assertLess(user.count("正在和听众聊天"), 10)
+
+        asyncio.run(main())
+
     def test_encode_rejects_outside_voices_dir(self):
         from app.services.tts_service import TTSService
 

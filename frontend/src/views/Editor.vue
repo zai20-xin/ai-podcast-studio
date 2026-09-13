@@ -147,16 +147,6 @@
 
           <audio ref="previewAudioEl" class="hidden-audio" controls />
 
-          <div class="global-instr">
-            <p class="studio-label">Global direction</p>
-            <el-input
-              v-model="editorStore.globalInstruction"
-              type="textarea"
-              :rows="2"
-              placeholder="例：场景是知识访谈，口语化，减少播音腔，自然停顿"
-            />
-          </div>
-
           <div class="io-row">
             <div class="io-item">
               <p class="studio-label">片头（可选）</p>
@@ -272,15 +262,20 @@
       </section>
 
       <aside class="channels">
+        <!-- 右侧自上而下：先定怎么演，再定谁来念 -->
+        <DirectorCard
+          :global-instruction="editorStore.globalInstruction"
+          :host-a="editorStore.hostA"
+          :host-b="editorStore.mode === 'dialogue' ? editorStore.hostB : null"
+          :mode="editorStore.mode"
+          @update:global-instruction="editorStore.globalInstruction = $event"
+        />
         <VoicePanel
           label="主播 A · Channel 1"
           channel="A"
           :config="editorStore.hostA"
-          :global-instruction="editorStore.globalInstruction"
           :available-speakers="editorStore.parsedSpeakers"
           :show-speaker-mapping="editorStore.mode === 'dialogue'"
-          :can-write-global="true"
-          @update:global-instruction="editorStore.globalInstruction = $event"
           @remember-voice="(v) => editorStore.rememberBuiltinVoice('A', v)"
           @restore-builtin-voice="restoreBuiltinVoice('A')"
         />
@@ -289,11 +284,8 @@
           label="主播 B · Channel 2"
           channel="B"
           :config="editorStore.hostB"
-          :global-instruction="editorStore.globalInstruction"
           :available-speakers="editorStore.parsedSpeakers"
           :show-speaker-mapping="editorStore.mode === 'dialogue'"
-          :can-write-global="false"
-          @update:global-instruction="editorStore.globalInstruction = $event"
           @remember-voice="(v) => editorStore.rememberBuiltinVoice('B', v)"
           @restore-builtin-voice="restoreBuiltinVoice('B')"
         />
@@ -350,6 +342,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useEditorStore } from '../stores/editor'
 import ScriptEditor from '../components/ScriptEditor.vue'
 import VoicePanel from '../components/VoicePanel.vue'
+import DirectorCard from '../components/DirectorCard.vue'
 import AudioPlayer from '../components/AudioPlayer.vue'
 import api from '../api'
 
@@ -1238,14 +1231,6 @@ function formatTime(dateStr) {
 
 .speaker-alert {
   margin-bottom: 14px;
-}
-
-.global-instr {
-  margin-top: 16px;
-}
-
-.global-instr .studio-label {
-  margin-bottom: 8px;
 }
 
 .channels {

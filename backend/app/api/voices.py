@@ -1,10 +1,12 @@
 """音色管理 API"""
 import re
+import uuid
 import shutil
 import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -36,12 +38,26 @@ BUILTIN_VOICES = [
 ]
 
 SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_\-]+")
+# 显示名允许中文/空格，只去掉控制字符
+_DISPLAY_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
 ALLOWED_UPLOAD_SUFFIXES = {".wav", ".mp3"}
 
 
-def _sanitize_upload_name(name: str) -> str:
-    cleaned = SAFE_NAME_RE.sub("_", (name or "").strip())[:64]
-    return cleaned or f"clone_{Path().stem}"
+def _sanitize_display_name(name: str) -> str:
+    cleaned = _DISPLAY_UNSAFE_RE.sub("", (name or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:64]
+
+
+def _safe_file_stem(raw: str) -> str:
+    return (SAFE_NAME_RE.sub("_", (raw or "").strip())[:48].strip("_")) or "ref"
+
+
+def _voice_under_voices_dir(path: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(VOICES_DIR.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 @router.get("/builtin")
@@ -72,18 +88,18 @@ def list_scene_presets():
 
 
 @router.post("/clone", response_model=ClonedVoiceResponse)
-async def clone_voice(name: str, audio: UploadFile = File(...), db: Session = Depends(get_db)):
+async def clone_voice(name: str = "克隆音色", audio: UploadFile = File(...), db: Session = Depends(get_db)):
     suffix = Path(audio.filename or "").suffix.lower()
     if suffix not in ALLOWED_UPLOAD_SUFFIXES:
         raise HTTPException(status_code=400, detail="仅支持 wav / mp3 文件")
 
-    safe_name = _sanitize_upload_name(name)
-    # 文件名来自客户端，强制消毒，防止路径穿越
+    display_name = _sanitize_display_name(name) or "克隆音色"
+    # 磁盘文件名与显示名解耦：允许中文显示名，落盘用短 slug + 随机后缀防撞
     original_stem = Path(audio.filename or "ref").stem
-    safe_stem = SAFE_NAME_RE.sub("_", original_stem)[:64] or "ref"
-    file_path = (VOICES_DIR / f"{safe_name}_{safe_stem}{suffix}").resolve()
+    safe_stem = _safe_file_stem(original_stem)
+    file_path = (VOICES_DIR / f"cv_{uuid.uuid4().hex[:10]}_{safe_stem}{suffix}").resolve()
 
-    if not file_path.is_relative_to(VOICES_DIR.resolve()):
+    if not _voice_under_voices_dir(file_path):
         raise HTTPException(status_code=400, detail="非法文件路径")
 
     max_bytes = MAX_REFERENCE_AUDIO_BYTES
@@ -101,11 +117,11 @@ async def clone_voice(name: str, audio: UploadFile = File(...), db: Session = De
                 )
             f.write(chunk)
 
-    voice = ClonedVoice(name=safe_name, reference_path=str(file_path))
+    voice = ClonedVoice(name=display_name, reference_path=str(file_path))
     db.add(voice)
     db.commit()
     db.refresh(voice)
-    logger.info("克隆音色已保存: %s", file_path)
+    logger.info("克隆音色已保存: name=%s path=%s", display_name, file_path)
     return voice
 
 
@@ -122,10 +138,34 @@ def get_cloned_voice_audio(voice_id: int, db: Session = Depends(get_db)):
     if not voice:
         raise HTTPException(status_code=404, detail="音色不存在")
     path = Path(voice.reference_path)
-    if not path.is_file() or not str(path.resolve()).startswith(str(VOICES_DIR.resolve())):
+    if not path.is_file() or not _voice_under_voices_dir(path):
         raise HTTPException(status_code=404, detail="参考音频文件不存在")
     media = "audio/wav" if path.suffix.lower() == ".wav" else "audio/mpeg"
     return FileResponse(path, media_type=media)
+
+
+class ClonedVoiceRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+@router.patch("/cloned/{voice_id}", response_model=ClonedVoiceResponse)
+def rename_cloned_voice(
+    voice_id: int,
+    data: ClonedVoiceRenameRequest,
+    db: Session = Depends(get_db),
+):
+    """重命名克隆素材（只改显示名，不挪动磁盘文件，避免破坏已有 reference_path）"""
+    voice = db.query(ClonedVoice).filter(ClonedVoice.id == voice_id).first()
+    if not voice:
+        raise HTTPException(status_code=404, detail="音色不存在")
+    new_name = _sanitize_display_name(data.name)
+    if not new_name:
+        raise HTTPException(status_code=400, detail="名称不能为空")
+    voice.name = new_name
+    db.commit()
+    db.refresh(voice)
+    logger.info("克隆音色已重命名: id=%s name=%s", voice_id, new_name)
+    return voice
 
 
 @router.delete("/cloned/{voice_id}")
@@ -135,10 +175,10 @@ def delete_cloned_voice(voice_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="音色不存在")
     try:
         path = Path(voice.reference_path)
-        if path.is_file() and str(path.resolve()).startswith(str(VOICES_DIR.resolve())):
+        if path.is_file() and _voice_under_voices_dir(path):
             path.unlink(missing_ok=True)
     except OSError as e:
         logger.warning("删除克隆音频失败: %s", e)
     db.delete(voice)
     db.commit()
-    return {"message": "删除成功"}
+    return {"message": "删除成功", "id": voice_id}

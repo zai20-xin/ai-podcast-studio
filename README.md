@@ -64,7 +64,7 @@ npm run dev
 | 语音合成 | [MiMo 控制台](https://platform.xiaomimimo.com/console/api-keys) |
 | 写稿 LLM | 任意 OpenAI 兼容服务；在「设置」中配置 Base URL / Key / 模型 |
 
-也可在应用内「设置」页直接填写（保存在本机后端进程环境，不写入前端存储）。
+也可在应用内「设置」页直接填写（会写入 `backend/.env`，重启后端后仍然有效；不写入前端存储）。
 
 ## 环境变量
 

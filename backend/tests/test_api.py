@@ -1,5 +1,6 @@
 """API 层单元/集成测试（TestClient，不依赖真实 TTS）"""
 import unittest
+from pathlib import Path
 
 from tests import os  # noqa: F401
 from fastapi.testclient import TestClient
@@ -45,6 +46,52 @@ class TestSettingsAPI(unittest.TestCase):
         self.assertIn("api_key_set", r.json())
         r = self.c.put("/api/settings", json={"base_url": "ftp://x"})
         self.assertEqual(r.status_code, 400)
+
+    def test_update_key_persists_to_env(self):
+        """设置页写的 Key 必须落盘，否则重启后丢失。"""
+        from app.config import ENV_PATH, runtime_config, persist_env
+        from app.api import settings as settings_mod
+
+        marker = "ut-persist-key-do-not-use"
+        old_key = runtime_config.api_key
+        backup = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else None
+        try:
+            r = self.c.put("/api/settings", json={"api_key": marker})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(runtime_config.api_key, marker)
+            self.assertTrue(ENV_PATH.exists())
+            content = ENV_PATH.read_text(encoding="utf-8")
+            self.assertIn(f"MIMO_API_KEY={marker}", content)
+
+            # 模拟重启：清空内存后从 env 读回
+            runtime_config._api_key = ""
+            os.environ.pop("MIMO_API_KEY", None)
+            # 属性会回落到 environ；再手动 load 一次
+            from dotenv import load_dotenv
+
+            load_dotenv(ENV_PATH, override=True)
+            self.assertEqual(runtime_config.api_key, marker)
+        finally:
+            runtime_config._api_key = old_key
+            if old_key:
+                os.environ["MIMO_API_KEY"] = old_key
+            else:
+                os.environ.pop("MIMO_API_KEY", None)
+            if backup is None:
+                if ENV_PATH.exists():
+                    # 恢复为「无该测试键」的状态：重写去掉 marker
+                    text = ENV_PATH.read_text(encoding="utf-8")
+                    ENV_PATH.write_text(
+                        "\n".join(
+                            ln
+                            for ln in text.splitlines()
+                            if not ln.startswith("MIMO_API_KEY=" + marker)
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+            else:
+                ENV_PATH.write_text(backup, encoding="utf-8")
 
 
 class TestParseAndEstimate(unittest.TestCase):
@@ -154,6 +201,78 @@ class TestEpisodeStatusFields(unittest.TestCase):
             self.assertIn(k, r.json())
         c.delete(f"/api/podcast/episodes/{eid}")
         c.delete(f"/api/projects/{pid}")
+
+
+class TestClonedVoiceManage(unittest.TestCase):
+    """克隆素材：上传命名 / 重命名 / 删除"""
+
+    def setUp(self):
+        self.c = make_client()
+        self._created: list[int] = []
+
+    def tearDown(self):
+        for vid in self._created:
+            try:
+                self.c.delete(f"/api/voices/cloned/{vid}")
+            except Exception:
+                pass
+
+    def _upload(self, name: str, filename: str = "ref.wav") -> dict:
+        from pydub.generators import Sine
+        import io
+
+        buf = io.BytesIO()
+        Sine(440).to_audio_segment(duration=200).export(buf, format="wav")
+        buf.seek(0)
+        r = self.c.post(
+            f"/api/voices/clone?name={name}",
+            files={"audio": (filename, buf.getvalue(), "audio/wav")},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self._created.append(r.json()["id"])
+        return r.json()
+
+    def test_upload_keeps_chinese_display_name(self):
+        body = self._upload("访谈女声·小雅", filename="interview host.wav")
+        self.assertEqual(body["name"], "访谈女声·小雅")
+        # 落盘路径不包含中文，且在 voices 目录下
+        self.assertIn("voices", body["reference_path"])
+        self.assertNotIn("访谈", Path(body["reference_path"]).name)
+
+    def test_rename_and_list(self):
+        body = self._upload("旧名字")
+        r = self.c.patch(f"/api/voices/cloned/{body['id']}", json={"name": "新名字 · 主播A"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["name"], "新名字 · 主播A")
+        # reference_path 不应因重命名而变化
+        self.assertEqual(r.json()["reference_path"], body["reference_path"])
+
+        r = self.c.get("/api/voices/cloned")
+        names = [v["name"] for v in r.json()]
+        self.assertIn("新名字 · 主播A", names)
+
+    def test_rename_empty_rejected(self):
+        body = self._upload("临时")
+        r = self.c.patch(f"/api/voices/cloned/{body['id']}", json={"name": "   "})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("不能为空", r.json()["detail"])
+        r = self.c.patch(f"/api/voices/cloned/{body['id']}", json={"name": ""})
+        self.assertEqual(r.status_code, 422)
+
+    def test_rename_unknown_404(self):
+        r = self.c.patch("/api/voices/cloned/999999", json={"name": "x"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_delete_removes_record(self):
+        body = self._upload("将删除")
+        path = Path(body["reference_path"])
+        self.assertTrue(path.exists())
+        r = self.c.delete(f"/api/voices/cloned/{body['id']}")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(path.exists())
+        r = self.c.get(f"/api/voices/cloned/{body['id']}/audio")
+        self.assertEqual(r.status_code, 404)
+        self._created.remove(body["id"])
 
 
 if __name__ == "__main__":
